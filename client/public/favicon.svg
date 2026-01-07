@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="green" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00b359"/>
+      <stop offset="100%" style="stop-color:#009246"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="33.33" height="100" fill="#009246"/>
+  <rect x="33.33" y="0" width="33.33" height="100" fill="#ffffff"/>
+  <rect x="66.66" y="0" width="33.34" height="100" fill="#ce2b37"/>
+  <circle cx="50" cy="50" r="20" fill="url(#green)" opacity="0.9"/>
+  <text x="50" y="58" text-anchor="middle" fill="white" font-size="20" font-family="Arial" font-weight="bold">TLS</text>
+</svg>

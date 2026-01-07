@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 380px;
+            max-height: 580px;
+            overflow-y: auto;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            color: white;
+            padding: 0;
+        }
+
+        /* === HEADER === */
+        .main-header {
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.15) 0%, rgba(0, 204, 106, 0.05) 100%);
+            padding: 16px;
+            border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .header-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            box-shadow: 0 4px 15px rgba(0, 255, 136, 0.3);
+        }
+
+        .brand-text h1 {
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        .brand-text span {
+            font-size: 10px;
+            color: #888;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .status-badge.inactive {
+            background: rgba(136, 136, 136, 0.2);
+            color: #888;
+        }
+
+        .status-badge.active {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+
+            0%,
+            100% {
+                box-shadow: 0 0 5px rgba(0, 255, 136, 0.3);
+            }
+
+            50% {
+                box-shadow: 0 0 15px rgba(0, 255, 136, 0.5);
+            }
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        /* === STATS BAR === */
+        .stats-bar {
+            display: flex;
+            gap: 16px;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stat-item .icon {
+            font-size: 14px;
+            opacity: 0.7;
+        }
+
+        .stat-item .value {
+            font-size: 14px;
+            font-weight: 700;
+            color: #00ff88;
+        }
+
+        .stat-item .label {
+            font-size: 10px;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        /* === MAIN CONTENT === */
+        .content {
+            padding: 12px;
+        }
+
+        /* === QUICK ACTIONS === */
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .quick-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 10px;
+            color: #aaa;
+        }
+
+        .quick-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(0, 255, 136, 0.3);
+            color: white;
+        }
+
+        .quick-btn .icon {
+            font-size: 18px;
+        }
+
+        .quick-btn.primary {
+            background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+            color: #000;
+            font-weight: 600;
+            border: none;
+        }
+
+        .quick-btn.primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 255, 136, 0.3);
+        }
+
+        .quick-btn.danger {
+            background: rgba(255, 85, 85, 0.2);
+            color: #ff5555;
+            border-color: rgba(255, 85, 85, 0.3);
+        }
+
+        /* === SECTIONS === */
+        .section {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .section-header:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .section-title .emoji {
+            font-size: 14px;
+        }
+
+        .section-toggle {
+            font-size: 10px;
+            color: #666;
+            transition: transform 0.2s;
+        }
+
+        .section.collapsed .section-toggle {
+            transform: rotate(-90deg);
+        }
+
+        .section-body {
+            padding: 0 12px 12px;
+            display: block;
+        }
+
+        .section.collapsed .section-body {
+            display: none;
+        }
+
+        /* === HISTORY === */
+        .history-list {
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            font-size: 11px;
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .history-item .status {
+            font-size: 12px;
+        }
+
+        .history-item .message {
+            flex: 1;
+            color: #aaa;
+        }
+
+        .history-item .time {
+            color: #555;
+            font-size: 10px;
+        }
+
+        /* === FORM ELEMENTS === */
+        .form-group {
+            margin-bottom: 10px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 11px;
+            color: #888;
+            margin-bottom: 4px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 13px;
+            transition: border-color 0.2s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #00ff88;
+            background: rgba(0, 255, 136, 0.05);
+        }
+
+        .form-input::placeholder {
+            color: #555;
+        }
+
+        textarea.form-input {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        .hint {
+            font-size: 10px;
+            color: #555;
+            margin-top: 4px;
+        }
+
+        /* === TOGGLES === */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+        }
+
+        .toggle-label {
+            font-size: 13px;
+            color: #ccc;
+        }
+
+        .toggle {
+            width: 44px;
+            height: 24px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .toggle.active {
+            background: #00ff88;
+        }
+
+        .toggle::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: white;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            transition: 0.2s;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .toggle.active::after {
+            left: 22px;
+        }
+
+        /* === SLIDERS === */
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #00ff88;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0, 255, 136, 0.4);
+        }
+
+        .slider-value {
+            min-width: 55px;
+            text-align: right;
+            font-size: 13px;
+            font-weight: 600;
+            color: #00ff88;
+        }
+
+        /* === BUTTONS === */
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+            color: #000;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 255, 136, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        /* === CLEAR BUTTON === */
+        .clear-btn {
+            font-size: 10px;
+            color: #666;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: #aaa;
+        }
+
+        /* === SCROLLBAR === */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        /* === HIDDEN ELEMENTS === */
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- HEADER -->
+    <div class="main-header">
+        <div class="header-top">
+            <div class="brand">
+                <div class="brand-icon">🇮🇹</div>
+                <div class="brand-text">
+                    <h1>TLS Slot Monitor</h1>
+                    <span>v4.6 • Italy Visa</span>
+                </div>
+            </div>
+            <div class="status-badge inactive" id="statusBadge">
+                <div class="status-dot"></div>
+                <span id="statusText">Не активен</span>
+            </div>
+        </div>
+        <div class="stats-bar">
+            <div class="stat-item">
+                <span class="icon">🔍</span>
+                <span class="value" id="checkCount">0</span>
+                <span class="label">проверок</span>
+            </div>
+            <div class="stat-item">
+                <span class="icon">🕐</span>
+                <span class="value" id="lastCheck">-</span>
+                <span class="label">последняя</span>
+            </div>
+            <div class="stat-item">
+                <span class="icon">⏱️</span>
+                <span class="value" id="nextCheckTime">-</span>
+                <span class="label" id="nextCheckLabel">след. проверка</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="content">
+        <!-- QUICK ACTIONS -->
+        <div class="quick-actions">
+            <button class="quick-btn primary" id="startBtn">
+                <span class="icon">▶️</span>
+                Старт
+            </button>
+            <button class="quick-btn danger hidden" id="stopBtn">
+                <span class="icon">⏹️</span>
+                Стоп
+            </button>
+            <button class="quick-btn" id="checkNowBtn">
+                <span class="icon">🔍</span>
+                Проверка
+            </button>
+            <button class="quick-btn" id="refreshPageBtn">
+                <span class="icon">🔄</span>
+                Обновить
+            </button>
+            <button class="quick-btn" id="openTlsBtn">
+                <span class="icon">🌐</span>
+                Сайт
+            </button>
+            <button class="quick-btn" id="copyScriptBtn">
+                <span class="icon">📋</span>
+                Скрипт
+            </button>
+        </div>
+
+        <!-- HISTORY -->
+        <div class="section" id="historySection">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">📋</span>
+                    История проверок
+                </div>
+                <span class="clear-btn" id="clearHistory">Очистить</span>
+            </div>
+            <div class="section-body">
+                <div class="history-list" id="historyList">
+                    <div style="color: #555; text-align: center; padding: 15px;">Запустите мониторинг</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- STATISTICS -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">📊</span>
+                    Статистика за неделю
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="stats-summary" style="display: flex; justify-content: space-around; margin-bottom: 15px;">
+                    <div style="text-align: center;">
+                        <div id="totalChecks" style="font-size: 24px; font-weight: bold; color: #00ff88;">0</div>
+                        <div style="font-size: 11px; color: #888;">проверок</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div id="totalSlots" style="font-size: 24px; font-weight: bold; color: #ffd700;">0</div>
+                        <div style="font-size: 11px; color: #888;">слотов найдено</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div id="successRate" style="font-size: 24px; font-weight: bold; color: #00bfff;">0%</div>
+                        <div style="font-size: 11px; color: #888;">успех</div>
+                    </div>
+                </div>
+                <div id="weeklyChart"
+                    style="display: flex; align-items: flex-end; justify-content: space-between; height: 60px; gap: 4px;">
+                    <!-- Bars будут добавлены через JS -->
+                </div>
+                <div
+                    style="display: flex; justify-content: space-between; margin-top: 5px; font-size: 10px; color: #666;">
+                    <span id="chartDayStart">-</span>
+                    <span id="chartDayEnd">Сегодня</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- URL CONFIG -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">🌐</span>
+                    Настройки мониторинга
+                </div>
+                <span class="section-toggle">▼</span>
+            </div>
+            <div class="section-body">
+                <div class="form-group">
+                    <label class="form-label">URL страницы записи</label>
+                    <input type="text" class="form-input" id="tlsUrl" placeholder="https://visas-it.tlscontact.com/...">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Фразы "нет слотов" (каждая с новой строки)</label>
+                    <textarea class="form-input" id="noSlotsKeywords"
+                        rows="3">we currently don't have any appointment slots available</textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Интервал проверки (мин. 8 мин для безопасности)</label>
+                    <div class="slider-container">
+                        <input type="range" class="slider" id="checkInterval" min="480" max="21600" step="60"
+                            value="480">
+                        <span class="slider-value" id="checkIntervalValue">8 мин</span>
+                    </div>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">Автообновление страницы</span>
+                    <div class="toggle active" id="autoRefreshToggle"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AUTO-LOGIN -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">🔐</span>
+                    Авто-вход
+                </div>
+                <span class="section-toggle">▼</span>
+            </div>
+            <div class="section-body">
+                <div class="toggle-row">
+                    <span class="toggle-label">Включить авто-вход</span>
+                    <div class="toggle" id="autoLoginToggle"></div>
+                </div>
+                <div id="autoLoginSettings" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label">Ссылка для входа (Login URL)</label>
+                        <input type="text" class="form-input" id="loginUrl" placeholder="https://auth...">
+                        <div class="hint">Укажите прямую ссылку на страницу логина</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Email</label>
+                        <input type="email" class="form-input" id="loginEmail" placeholder="email@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Пароль</label>
+                        <input type="password" class="form-input" id="loginPassword" placeholder="••••••••">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NOTIFICATIONS -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">🔔</span>
+                    Уведомления
+                </div>
+                <span class="section-toggle">▼</span>
+            </div>
+            <div class="section-body">
+                <div class="toggle-row">
+                    <span class="toggle-label">🔊 Звуковые</span>
+                    <div class="toggle active" id="soundToggle"></div>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">🔔 Браузерные</span>
+                    <div class="toggle active" id="browserNotifyToggle"></div>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label">📱 Telegram</span>
+                    <div class="toggle active" id="telegramToggle"></div>
+                </div>
+                <div id="telegramSettings">
+                    <div class="form-group">
+                        <label class="form-label">Bot Token</label>
+                        <input type="text" class="form-input" id="botToken" placeholder="123456789:ABC..."
+                            style="background: rgba(0,0,0,0.5);" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Chat IDs (через запятую)</label>
+                        <input type="text" class="form-input" id="chatIds" placeholder="123456789">
+                    </div>
+                    <button class="btn btn-secondary" id="testBtn">
+                        📱 Тест Telegram
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- SAVE BUTTON -->
+        <button class="btn btn-primary" id="saveBtn" style="margin-top: 8px;">
+            💾 Сохранить настройки
+        </button>
+        <div id="saveStatus"
+            style="display: none; text-align: center; margin-top: 8px; color: #00ff88; font-weight: 600;">
+            ✅ Сохранено!
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+
+</html>
