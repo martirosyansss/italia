@@ -437,6 +437,168 @@
             background: rgba(255, 255, 255, 0.12);
         }
 
+        .quick-btn:disabled,
+        .btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .form-input.invalid {
+            border-color: rgba(255, 107, 107, 0.95);
+            box-shadow: 0 0 0 1px rgba(255, 107, 107, 0.25);
+        }
+
+        .validation-message {
+            display: none;
+            margin-top: 6px;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+
+        .validation-message.error {
+            display: block;
+            color: #ff8f8f;
+        }
+
+        .validation-message.info {
+            display: block;
+            color: #ffcc66;
+        }
+
+        .health-list {
+            display: grid;
+            gap: 8px;
+        }
+
+        .health-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            font-size: 11px;
+        }
+
+        .health-item strong {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .health-value {
+            text-align: right;
+            color: #9aa0a6;
+        }
+
+        .health-value.ok {
+            color: #00ff88;
+        }
+
+        .health-value.warn {
+            color: #ffcc66;
+        }
+
+        .health-value.error {
+            color: #ff8f8f;
+        }
+
+        .state-card {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .state-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .state-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.08);
+            color: #c2c7cf;
+        }
+
+        .state-pill.ok {
+            background: rgba(0, 255, 136, 0.14);
+            color: #00ff88;
+        }
+
+        .state-pill.warn {
+            background: rgba(255, 204, 102, 0.14);
+            color: #ffcc66;
+        }
+
+        .state-pill.error {
+            background: rgba(255, 143, 143, 0.14);
+            color: #ff8f8f;
+        }
+
+        .state-reason {
+            font-size: 11px;
+            color: #9aa0a6;
+            line-height: 1.4;
+            min-height: 16px;
+        }
+
+        .debug-grid {
+            display: grid;
+            gap: 8px;
+        }
+
+        .debug-item {
+            display: grid;
+            gap: 4px;
+        }
+
+        .debug-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #7f8794;
+        }
+
+        .debug-value {
+            font-size: 11px;
+            line-height: 1.45;
+            color: #d8dde6;
+            word-break: break-word;
+        }
+
+        .debug-box {
+            max-height: 96px;
+            overflow: auto;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.24);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            white-space: pre-wrap;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .debug-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .debug-actions .btn {
+            flex: 1;
+            margin-top: 0;
+        }
+
         /* === CLEAR BUTTON === */
         .clear-btn {
             font-size: 10px;
@@ -540,6 +702,103 @@
                 Скрипт
             </button>
         </div>
+        <div id="actionValidationMessage" class="validation-message"></div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">📡</span>
+                    Состояние мониторинга
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="state-card">
+                    <div class="state-top">
+                        <strong>Текущее состояние</strong>
+                        <span class="state-pill" id="monitorStatePill">Ожидание</span>
+                    </div>
+                    <div class="state-reason" id="monitorStateReason">Нет активной диагностики</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">🛡️</span>
+                    Статус безопасности
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="health-list">
+                    <div class="health-item">
+                        <strong>TLS URL</strong>
+                        <span class="health-value" id="healthTlsUrl">Проверка...</span>
+                    </div>
+                    <div class="health-item">
+                        <strong>Авто-вход</strong>
+                        <span class="health-value" id="healthAutoLogin">Проверка...</span>
+                    </div>
+                    <div class="health-item">
+                        <strong>Telegram</strong>
+                        <span class="health-value" id="healthTelegram">Проверка...</span>
+                    </div>
+                    <div class="health-item">
+                        <strong>Polling</strong>
+                        <span class="health-value" id="healthPolling">Проверка...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <span class="emoji">🧪</span>
+                    Debug
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="debug-grid">
+                    <div class="debug-item">
+                        <div class="debug-label">Последняя диагностика</div>
+                        <div class="debug-value" id="debugCheckedAt">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">URL</div>
+                        <div class="debug-value" id="debugUrl">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Состояние</div>
+                        <div class="debug-value" id="debugState">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Причина</div>
+                        <div class="debug-value" id="debugReason">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Длина текста</div>
+                        <div class="debug-value" id="debugTextLength">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Ключевое совпадение</div>
+                        <div class="debug-value" id="debugMatchedKeyword">-</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Фрагмент текста</div>
+                        <div class="debug-value debug-box" id="debugTextSample">Нет данных</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Логов в буфере</div>
+                        <div class="debug-value" id="debugLogCount">0</div>
+                    </div>
+                    <div class="debug-actions">
+                        <button class="btn btn-secondary" id="copyDebugBtn">📎 Copy Debug</button>
+                        <button class="btn btn-secondary" id="exportLogsBtn">💾 Export Logs</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- HISTORY -->
         <div class="section" id="historySection">
@@ -605,6 +864,7 @@
                 <div class="form-group">
                     <label class="form-label">URL страницы записи</label>
                     <input type="text" class="form-input" id="tlsUrl" placeholder="https://visas-it.tlscontact.com/...">
+                    <div id="tlsUrlValidationMessage" class="validation-message"></div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Фразы "нет слотов" (каждая с новой строки)</label>
@@ -644,6 +904,7 @@
                     <div class="form-group">
                         <label class="form-label">Ссылка для входа (Login URL)</label>
                         <input type="text" class="form-input" id="loginUrl" placeholder="https://auth...">
+                        <div id="loginUrlValidationMessage" class="validation-message"></div>
                         <div class="hint">Укажите прямую ссылку на страницу логина</div>
                     </div>
                     <div class="form-group">
@@ -653,6 +914,12 @@
                     <div class="form-group">
                         <label class="form-label">Пароль</label>
                         <input type="password" class="form-input" id="loginPassword" placeholder="••••••••">
+                        <div class="hint">Пароль сохраняется для авто-входа и используется extension автоматически на странице логина.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Страница после логина (Post-Login URL)</label>
+                        <input type="text" class="form-input" id="postLoginUrl" placeholder="https://visas-it.tlscontact.com/...">
+                        <div class="hint">Если после логина открывается промежуточная страница (travel-groups и т.д.), укажите её URL. Extension перейдёт на неё и нажмёт Select.</div>
                     </div>
                 </div>
             </div>
@@ -707,6 +974,8 @@
         </div>
     </div>
 
+    <script src="state-machine.js"></script>
+    <script src="diagnostic-logger.js"></script>
     <script src="popup.js"></script>
 </body>
 

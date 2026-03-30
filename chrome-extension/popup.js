@@ -1,5 +1,60 @@
 // Popup script
 document.addEventListener('DOMContentLoaded', async () => {
+    const normalizeTlsUrl = normalizeTlsUrlValue;
+
+    function getTlsStartUrl(rawTlsUrl) {
+        try {
+            const target = new URL(rawTlsUrl);
+            return `${target.origin}/en-us`;
+        } catch (error) {
+            return '';
+        }
+    }
+
+    function setSaveStatus(message, isError = false) {
+        saveStatus.textContent = message;
+        saveStatus.style.display = 'block';
+        saveStatus.style.color = isError ? '#ff6b6b' : '#00ff88';
+    }
+
+    function clearSaveStatus() {
+        saveStatus.style.display = 'none';
+        saveStatus.textContent = '✅ Сохранено!';
+        saveStatus.style.color = '#00ff88';
+    }
+
+    function setValidationMessage(element, message, tone = 'error') {
+        element.textContent = message || '';
+        element.className = `validation-message${message ? ` ${tone}` : ''}`;
+    }
+
+    function setFieldValidation(input, element, message) {
+        input.classList.toggle('invalid', Boolean(message));
+        setValidationMessage(element, message, 'error');
+    }
+
+    function setActionValidation(message) {
+        setValidationMessage(actionValidationMessage, message, 'info');
+    }
+
+    function clearActionValidation() {
+        setValidationMessage(actionValidationMessage, '');
+    }
+
+    async function trySaveSettings(showActionMessage = false) {
+        if (showActionMessage) {
+            validateInputs(true);
+        } else {
+            updateHealthStatus();
+        }
+
+        try {
+            await saveSettings();
+        } catch (error) {
+            setSaveStatus(error.message, true);
+        }
+    }
+
     // === SECTION TOGGLE FUNCTIONALITY ===
     document.querySelectorAll('.section-header').forEach(header => {
         header.addEventListener('click', (e) => {
@@ -36,12 +91,170 @@ document.addEventListener('DOMContentLoaded', async () => {
     const loginUrlInput = document.getElementById('loginUrl');
     const loginEmailInput = document.getElementById('loginEmail');
     const loginPasswordInput = document.getElementById('loginPassword');
+    const postLoginUrlInput = document.getElementById('postLoginUrl');
+    const tlsUrlValidationMessage = document.getElementById('tlsUrlValidationMessage');
+    const loginUrlValidationMessage = document.getElementById('loginUrlValidationMessage');
+    const healthTlsUrl = document.getElementById('healthTlsUrl');
+    const healthAutoLogin = document.getElementById('healthAutoLogin');
+    const healthTelegram = document.getElementById('healthTelegram');
+    const healthPolling = document.getElementById('healthPolling');
+    const actionValidationMessage = document.getElementById('actionValidationMessage');
+    const monitorStatePill = document.getElementById('monitorStatePill');
+    const monitorStateReason = document.getElementById('monitorStateReason');
+    const debugCheckedAt = document.getElementById('debugCheckedAt');
+    const debugUrl = document.getElementById('debugUrl');
+    const debugState = document.getElementById('debugState');
+    const debugReason = document.getElementById('debugReason');
+    const debugTextLength = document.getElementById('debugTextLength');
+    const debugMatchedKeyword = document.getElementById('debugMatchedKeyword');
+    const debugTextSample = document.getElementById('debugTextSample');
+    const debugLogCount = document.getElementById('debugLogCount');
+    const copyDebugBtn = document.getElementById('copyDebugBtn');
+    const exportLogsBtn = document.getElementById('exportLogsBtn');
+    let currentMonitorState = TLS_PAGE_STATES.IDLE;
+    let currentMonitorReason = 'Нет активной диагностики';
+    let currentLastDiagnostic = {};
+    let currentDiagnosticLogs = [];
 
     // Поля ввода
     const botTokenInput = document.getElementById('botToken');
     const chatIdsInput = document.getElementById('chatIds');
     const tlsUrlInput = document.getElementById('tlsUrl');
     const noSlotsKeywordsInput = document.getElementById('noSlotsKeywords');
+
+    function setHealthValue(element, message, tone) {
+        element.textContent = message;
+        element.className = `health-value${tone ? ` ${tone}` : ''}`;
+    }
+
+    function updateHealthStatus() {
+        const tlsValidation = normalizeTlsUrl(tlsUrlInput.value);
+        const loginValidation = loginUrlInput.value.trim() ? normalizeTlsUrl(loginUrlInput.value.trim()) : { valid: true };
+        const autoLoginEnabled = isToggleActive(autoLoginToggle);
+        const telegramEnabled = isToggleActive(telegramToggle);
+        const intervalSeconds = parseInt(checkIntervalSlider.value, 10) || 0;
+
+        setHealthValue(
+            healthTlsUrl,
+            tlsValidation.valid ? 'OK' : 'Ошибка URL',
+            tlsValidation.valid ? 'ok' : 'error'
+        );
+
+        if (!autoLoginEnabled) {
+            setHealthValue(healthAutoLogin, 'Выключен', 'warn');
+        } else if (!loginEmailInput.value.trim()) {
+            setHealthValue(healthAutoLogin, 'Нет email, будет ручной вход', 'warn');
+        } else if (!loginPasswordInput.value.trim()) {
+            setHealthValue(healthAutoLogin, '⚠️ Пароль не сохранён! Введите пароль', 'error');
+        } else if (!loginValidation.valid) {
+            setHealthValue(healthAutoLogin, 'Ошибка Login URL', 'error');
+        } else {
+            setHealthValue(healthAutoLogin, 'Готов', 'ok');
+        }
+
+        if (!telegramEnabled) {
+            setHealthValue(healthTelegram, 'Выключен', 'warn');
+        } else if (!botTokenInput.value.trim()) {
+            setHealthValue(healthTelegram, 'Нет токена', 'error');
+        } else if (!chatIdsInput.value.trim()) {
+            setHealthValue(healthTelegram, 'Нет chat IDs', 'error');
+        } else {
+            setHealthValue(healthTelegram, 'Настроен', 'ok');
+        }
+
+        if (intervalSeconds < 480) {
+            setHealthValue(healthPolling, 'Интервал слишком частый', 'error');
+        } else if (intervalSeconds < 600) {
+            setHealthValue(healthPolling, `TLS ${Math.round(intervalSeconds / 60)} мин • TG 1 мин`, 'warn');
+        } else {
+            setHealthValue(healthPolling, `TLS ${Math.round(intervalSeconds / 60)} мин • TG 1 мин`, 'ok');
+        }
+    }
+
+    function renderMonitorState(state, reason) {
+        currentMonitorState = state || TLS_PAGE_STATES.IDLE;
+        currentMonitorReason = reason || 'Нет активной диагностики';
+        const meta = getMonitorStateMeta(currentMonitorState);
+        monitorStatePill.textContent = meta.label;
+        monitorStatePill.className = `state-pill${meta.tone ? ` ${meta.tone}` : ''}`;
+        monitorStateReason.textContent = currentMonitorReason;
+    }
+
+    function formatDebugTimestamp(value) {
+        if (!value) {
+            return '-';
+        }
+
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            return String(value);
+        }
+
+        return parsed.toLocaleString('ru-RU');
+    }
+
+    function renderDebugPanel(diagnostic = {}) {
+        currentLastDiagnostic = diagnostic || {};
+        debugCheckedAt.textContent = formatDebugTimestamp(diagnostic.checkedAt);
+        debugUrl.textContent = diagnostic.url || '-';
+        debugState.textContent = diagnostic.state || '-';
+        debugReason.textContent = diagnostic.reason || '-';
+        debugTextLength.textContent = Number.isFinite(diagnostic.textLength) ? String(diagnostic.textLength) : '-';
+        debugMatchedKeyword.textContent = diagnostic.matchedKeyword || '-';
+        debugTextSample.textContent = diagnostic.debugText || 'Нет данных';
+    }
+
+    function renderDiagnosticLogs(logs = []) {
+        currentDiagnosticLogs = Array.isArray(logs) ? logs : [];
+        debugLogCount.textContent = `${currentDiagnosticLogs.length} / ${DIAGNOSTIC_LOG_LIMIT}`;
+    }
+
+    function buildDebugSnapshot() {
+        return {
+            monitorState: currentMonitorState,
+            monitorReason: currentMonitorReason,
+            lastDiagnostic: currentLastDiagnostic,
+            diagnosticLogs: currentDiagnosticLogs
+        };
+    }
+
+    async function copyTextWithFeedback(button, text, successLabel) {
+        const originalHTML = button.innerHTML;
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                button.innerHTML = successLabel;
+                setTimeout(() => {
+                    button.innerHTML = originalHTML;
+                }, 2000);
+                return true;
+            } catch (error) {
+                console.warn('Clipboard API failed:', error);
+            }
+        }
+
+        try {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            const success = document.execCommand('copy');
+            document.body.removeChild(textarea);
+            button.innerHTML = success ? successLabel : '<span class="icon">❌</span>Ошибка';
+        } catch (error) {
+            button.innerHTML = '<span class="icon">❌</span>Ошибка';
+        }
+
+        setTimeout(() => {
+            button.innerHTML = originalHTML;
+        }, 2000);
+
+        return false;
+    }
 
     // Дефолтные значения (токен убран для безопасности)
     const DEFAULT_BOT_TOKEN = '';
@@ -53,7 +266,8 @@ no appointment slots
 please check this page regularly`;
 
     // Загрузка настроек
-    const settings = await chrome.storage.local.get([
+    const [settings, sessionSecrets] = await Promise.all([
+        chrome.storage.local.get([
         'isRunning',
         'checkInterval',
         'refreshInterval',
@@ -67,11 +281,23 @@ please check this page regularly`;
         'telegramEnabled',
         'checkCount',
         'lastCheck',
+        'monitorState',
+        'monitorReason',
+        'lastDiagnostic',
+        'diagnosticLogs',
         'autoLogin',
         'loginUrl',
         'loginEmail',
-        'loginPassword'
+        'loginPassword',
+        'postLoginUrl'
+        ]),
+        chrome.storage.session.get(['loginPassword'])
     ]);
+
+    if (!settings.loginPassword && sessionSecrets.loginPassword) {
+        settings.loginPassword = sessionSecrets.loginPassword;
+        await chrome.storage.local.set({ loginPassword: sessionSecrets.loginPassword });
+    }
 
     // Применяем сохранённые настройки (минимум 480 сек = 8 мин для безопасности)
     checkIntervalSlider.value = Math.max(480, settings.checkInterval || 480);
@@ -82,7 +308,8 @@ please check this page regularly`;
 
     loginUrlInput.value = settings.loginUrl || '';
     loginEmailInput.value = settings.loginEmail || '';
-    loginPasswordInput.value = settings.loginPassword || '';
+    loginPasswordInput.value = settings.loginPassword || sessionSecrets.loginPassword || '';
+    postLoginUrlInput.value = settings.postLoginUrl || '';
 
     updateSliderValue(checkIntervalSlider, checkIntervalValue);
 
@@ -95,10 +322,25 @@ please check this page regularly`;
     telegramSettings.style.display = settings.telegramEnabled !== false ? 'block' : 'none';
     autoLoginSettings.style.display = settings.autoLogin === true ? 'block' : 'none';
 
+    // Prominent password warning when autoLogin enabled but password is empty
+    if (settings.autoLogin === true && !loginPasswordInput.value.trim()) {
+        loginPasswordInput.style.border = '2px solid #e74c3c';
+        loginPasswordInput.setAttribute('placeholder', '⚠️ ВВЕДИТЕ ПАРОЛЬ!');
+        if (settings.loginEmail) {
+            // Email exists but password lost — auto-focus and expand section
+            autoLoginSettings.style.display = 'block';
+            loginPasswordInput.focus();
+        }
+    }
+
     checkCountEl.textContent = settings.checkCount || 0;
     lastCheckEl.textContent = settings.lastCheck || '-';
+    renderMonitorState(settings.monitorState, settings.monitorReason);
+    renderDebugPanel(settings.lastDiagnostic);
+    renderDiagnosticLogs(settings.diagnosticLogs);
 
     updateStatus(settings.isRunning);
+    validateInputs();
 
     // === ТАЙМЕР ДО СЛЕДУЮЩЕЙ ПРОВЕРКИ ===
     const nextCheckTimeEl = document.getElementById('nextCheckTime');
@@ -162,19 +404,49 @@ please check this page regularly`;
     async function loadHistory() {
         const { checkHistory } = await chrome.storage.local.get('checkHistory');
         if (!checkHistory || checkHistory.length === 0) {
-            historyListEl.innerHTML = '<div style="color: #666; text-align: center; padding: 10px;">Пока нет проверок</div>';
+            historyListEl.replaceChildren();
+            const emptyState = document.createElement('div');
+            emptyState.style.color = '#666';
+            emptyState.style.textAlign = 'center';
+            emptyState.style.padding = '10px';
+            emptyState.textContent = 'Пока нет проверок';
+            historyListEl.appendChild(emptyState);
             return;
         }
 
-        historyListEl.innerHTML = checkHistory.slice(-15).reverse().map(entry => {
+        const fragment = document.createDocumentFragment();
+
+        checkHistory.slice(-15).reverse().forEach(entry => {
             const icon = entry.status === 'slots' ? '🎉' : entry.status === 'no_slots' ? '❌' : entry.status === 'logout' ? '⚠️' : '🔄';
             const color = entry.status === 'slots' ? '#00ff88' : entry.status === 'no_slots' ? '#888' : entry.status === 'logout' ? '#ff6b6b' : '#ffc107';
-            return `<div style="display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                <span>${icon}</span>
-                <span style="color: ${color}; flex: 1;">${entry.message}</span>
-                <span style="color: #666; font-size: 10px;">${entry.time}</span>
-            </div>`;
-        }).join('');
+
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '8px';
+            row.style.padding = '4px 0';
+            row.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+
+            const iconEl = document.createElement('span');
+            iconEl.textContent = icon;
+
+            const messageEl = document.createElement('span');
+            messageEl.style.color = color;
+            messageEl.style.flex = '1';
+            messageEl.textContent = entry.message || '';
+
+            const timeEl = document.createElement('span');
+            timeEl.style.color = '#666';
+            timeEl.style.fontSize = '10px';
+            timeEl.textContent = entry.time || '';
+
+            row.appendChild(iconEl);
+            row.appendChild(messageEl);
+            row.appendChild(timeEl);
+            fragment.appendChild(row);
+        });
+
+        historyListEl.replaceChildren(fragment);
     }
 
     loadHistory();
@@ -248,6 +520,18 @@ please check this page regularly`;
         if (changes.isRunning) {
             updateStatus(changes.isRunning.newValue);
         }
+        if (changes.monitorState || changes.monitorReason) {
+            renderMonitorState(
+                changes.monitorState ? changes.monitorState.newValue : currentMonitorState,
+                changes.monitorReason ? changes.monitorReason.newValue : currentMonitorReason
+            );
+        }
+        if (changes.lastDiagnostic) {
+            renderDebugPanel(changes.lastDiagnostic.newValue);
+        }
+        if (changes.diagnosticLogs) {
+            renderDiagnosticLogs(changes.diagnosticLogs.newValue);
+        }
     });
 
     // Функции
@@ -276,22 +560,91 @@ please check this page regularly`;
         return toggle.classList.contains('active');
     }
 
+    function validateInputs(showActionMessage = false) {
+        const tlsValidation = normalizeTlsUrl(tlsUrlInput.value);
+        const loginUrlRaw = loginUrlInput.value.trim();
+        const loginValidation = loginUrlRaw ? normalizeTlsUrl(loginUrlRaw) : { valid: true };
+        const autoLoginEnabled = isToggleActive(autoLoginToggle);
+        const hasLoginEmail = Boolean(loginEmailInput.value.trim());
+        const hasLoginPassword = Boolean(loginPasswordInput.value.trim());
+
+        setFieldValidation(
+            tlsUrlInput,
+            tlsUrlValidationMessage,
+            tlsValidation.valid ? '' : `Неверный URL страницы записи: ${tlsValidation.reason}`
+        );
+
+        setFieldValidation(
+            loginUrlInput,
+            loginUrlValidationMessage,
+            loginValidation.valid ? '' : `Неверный Login URL: ${loginValidation.reason}`
+        );
+
+        const isTlsBlocked = !tlsValidation.valid;
+        const isLoginBlocked = autoLoginEnabled && !loginValidation.valid;
+        const hasAutoLoginGap = autoLoginEnabled && (!hasLoginEmail || !hasLoginPassword);
+        const isBlocked = isTlsBlocked || isLoginBlocked;
+
+        startBtn.disabled = isBlocked;
+        openTlsBtn.disabled = isTlsBlocked;
+
+        if (showActionMessage) {
+            if (isTlsBlocked) {
+                setActionValidation('Старт заблокирован: исправьте URL страницы записи. Разрешены только HTTPS ссылки на tlscontact.com.');
+            } else if (isLoginBlocked) {
+                setActionValidation('Старт заблокирован: исправьте Login URL в разделе авто-вход или выключите авто-вход.');
+            } else if (hasAutoLoginGap) {
+                setActionValidation('Авто-вход недоступен: нет email или пароля в сессии. Старт разрешён, но логин придётся пройти вручную.');
+            } else {
+                clearActionValidation();
+            }
+        } else if (!isBlocked) {
+            clearActionValidation();
+        }
+
+        return !isBlocked;
+    }
+
     async function saveSettings() {
+        const tlsUrl = normalizeTlsUrl(tlsUrlInput.value);
+        if (!tlsUrl.valid) {
+            throw new Error(`URL страницы записи: ${tlsUrl.reason}`);
+        }
+
+        const loginUrlValue = loginUrlInput.value.trim();
+        let normalizedLoginUrl = '';
+
+        if (loginUrlValue) {
+            const loginUrl = normalizeTlsUrl(loginUrlValue);
+            if (!loginUrl.valid) {
+                throw new Error(`Login URL: ${loginUrl.reason}`);
+            }
+            normalizedLoginUrl = loginUrl.value;
+        }
+
         await chrome.storage.local.set({
             checkInterval: parseInt(checkIntervalSlider.value),
             autoRefresh: isToggleActive(autoRefreshToggle),
             botToken: botTokenInput.value,
             chatIds: chatIdsInput.value,
-            tlsUrl: tlsUrlInput.value,
+            tlsUrl: tlsUrl.value,
             noSlotsKeywords: noSlotsKeywordsInput.value,
             soundEnabled: isToggleActive(soundToggle),
             browserNotify: isToggleActive(browserNotifyToggle),
             telegramEnabled: isToggleActive(telegramToggle),
             autoLogin: isToggleActive(autoLoginToggle),
-            loginUrl: loginUrlInput.value,
+            loginUrl: normalizedLoginUrl,
             loginEmail: loginEmailInput.value,
+            loginPassword: loginPasswordInput.value,
+            postLoginUrl: postLoginUrlInput.value.trim()
+        });
+
+        await chrome.storage.session.set({
             loginPassword: loginPasswordInput.value
         });
+
+        tlsUrlInput.value = tlsUrl.value;
+        loginUrlInput.value = normalizedLoginUrl;
     }
 
     function updateStatus(isRunning) {
@@ -311,58 +664,95 @@ please check this page regularly`;
     // События слайдеров
     checkIntervalSlider.addEventListener('input', () => {
         updateSliderValue(checkIntervalSlider, checkIntervalValue);
+        updateHealthStatus();
     });
-    checkIntervalSlider.addEventListener('change', saveSettings);
+    checkIntervalSlider.addEventListener('change', () => trySaveSettings());
 
     // События переключателей
     autoRefreshToggle.addEventListener('click', () => {
         autoRefreshToggle.classList.toggle('active');
-        saveSettings();
+        trySaveSettings();
     });
 
     autoLoginToggle.addEventListener('click', () => {
         autoLoginToggle.classList.toggle('active');
         autoLoginSettings.style.display = isToggleActive(autoLoginToggle) ? 'block' : 'none';
-        saveSettings();
+        validateInputs(true);
+        trySaveSettings(true);
     });
 
     telegramToggle.addEventListener('click', () => {
         telegramToggle.classList.toggle('active');
         telegramSettings.style.display = isToggleActive(telegramToggle) ? 'block' : 'none';
-        saveSettings();
+        updateHealthStatus();
+        trySaveSettings();
     });
 
     soundToggle.addEventListener('click', () => {
         soundToggle.classList.toggle('active');
-        saveSettings();
+        trySaveSettings();
     });
 
     browserNotifyToggle.addEventListener('click', () => {
         browserNotifyToggle.classList.toggle('active');
-        saveSettings();
+        trySaveSettings();
     });
 
     // События полей ввода (убираем автосохранение)
     // botTokenInput.addEventListener('change', saveSettings);
     // chatIdsInput.addEventListener('change', saveSettings);
+    botTokenInput.addEventListener('input', updateHealthStatus);
+    loginEmailInput.addEventListener('input', () => {
+        updateHealthStatus();
+        validateInputs(true);
+    });
+    loginPasswordInput.addEventListener('input', () => {
+        loginPasswordInput.style.border = '';
+        loginPasswordInput.setAttribute('placeholder', '••••••••');
+        updateHealthStatus();
+        validateInputs(true);
+    });
+    chatIdsInput.addEventListener('input', updateHealthStatus);
 
     // Кнопка сохранения
     const saveBtn = document.getElementById('saveBtn');
     const saveStatus = document.getElementById('saveStatus');
 
     saveBtn.addEventListener('click', async () => {
-        await saveSettings();
-        saveBtn.textContent = '✅ Сохранено!';
-        saveStatus.style.display = 'block';
-        setTimeout(() => {
-            saveBtn.textContent = '💾 Сохранить настройки';
-            saveStatus.style.display = 'none';
-        }, 2000);
+        try {
+            await saveSettings();
+            validateInputs();
+            saveBtn.textContent = '✅ Сохранено!';
+            setSaveStatus('✅ Сохранено!');
+            setTimeout(() => {
+                saveBtn.textContent = '💾 Сохранить настройки';
+                clearSaveStatus();
+            }, 2000);
+        } catch (error) {
+            saveBtn.textContent = '❌ Ошибка';
+            setSaveStatus(error.message, true);
+            setTimeout(() => {
+                saveBtn.textContent = '💾 Сохранить настройки';
+            }, 2000);
+        }
     });
 
     // Запуск мониторинга
     startBtn.addEventListener('click', async () => {
-        await saveSettings();
+        if (!validateInputs(true)) {
+            return;
+        }
+
+        try {
+            await saveSettings();
+        } catch (error) {
+            validateInputs(true);
+            setSaveStatus(error.message, true);
+            return;
+        }
+
+        clearActionValidation();
+
         await chrome.storage.local.set({ isRunning: true, checkCount: 0 });
         chrome.runtime.sendMessage({ action: 'start' });
 
@@ -374,66 +764,7 @@ please check this page regularly`;
             // Сразу показываем индикатор на страницах с этим доменом
             const tabs = await chrome.tabs.query({ url: urlPattern });
             for (const tab of tabs) {
-                chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: () => {
-                        const existing = document.getElementById('tls-ext-indicator');
-                        if (existing) return;
-
-                        const div = document.createElement('div');
-                        div.id = 'tls-ext-indicator';
-                        div.innerHTML = `
-                            <div id="tls-panel" style="
-                                position: fixed;
-                                bottom: 20px;
-                                right: 20px;
-                                background: rgba(16, 24, 40, 0.95);
-                                color: white;
-                                padding: 12px 16px;
-                                border-radius: 12px;
-                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                                font-size: 13px;
-                                z-index: 2147483647;
-                                display: flex;
-                                align-items: center;
-                                gap: 12px;
-                                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-                                border: 1px solid rgba(255, 255, 255, 0.1);
-                                backdrop-filter: blur(8px);
-                                transition: all 0.3s ease;
-                                cursor: default;
-                                user-select: none;
-                            ">
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                    <span style="font-size: 18px;">🇮🇹</span>
-                                    <div>
-                                        <div style="font-weight: 600; color: #fff;">TLS Monitor</div>
-                                        <div style="font-size: 11px; color: #00ff88; display: flex; align-items: center; gap: 4px;">
-                                            <span style="width: 6px; height: 6px; background: #00ff88; border-radius: 50%; display: inline-block; animation: tls-pulse 1.5s infinite;"></span>
-                                            Активен
-                                        </div>
-                                    </div>
-                                </div>
-                                <div style="width: 1px; height: 24px; background: rgba(255,255,255,0.1); margin: 0 4px;"></div>
-                                <div style="cursor: pointer; padding: 4px; opacity: 0.6; transition: opacity 0.2s;" 
-                                     onmouseover="this.style.opacity=1" 
-                                     onmouseout="this.style.opacity=0.6"
-                                     onclick="document.getElementById('tls-panel').style.display='none'">
-                                    ✕
-                                </div>
-                            </div>
-                            <style>
-                                @keyframes tls-pulse {
-                                    0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
-                                    70% { box-shadow: 0 0 0 6px rgba(0, 255, 136, 0); }
-                                    100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
-                                }
-                            </style>
-                        `;
-                        document.body.appendChild(div);
-                        console.log('🚀 Slot Monitor: Запущен');
-                    }
-                }).catch(() => { });
+                chrome.tabs.sendMessage(tab.id, { action: 'showIndicator' }).catch(() => { });
             }
         } catch (e) {
             console.error('Неверный URL:', e);
@@ -451,14 +782,7 @@ please check this page regularly`;
         const tabs = await chrome.tabs.query({});
         for (const tab of tabs) {
             try {
-                chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: () => {
-                        const el = document.getElementById('tls-ext-indicator');
-                        if (el) el.remove();
-                        console.log('🛑 Slot Monitor: Остановлен');
-                    }
-                }).catch(() => { });
+                chrome.tabs.sendMessage(tab.id, { action: 'hideIndicator' }).catch(() => { });
             } catch (e) { }
         }
 
@@ -467,7 +791,17 @@ please check this page regularly`;
 
     // Открыть сайт (с пользовательским URL)
     openTlsBtn.addEventListener('click', () => {
-        chrome.tabs.create({ url: tlsUrlInput.value });
+        if (!validateInputs(true)) {
+            return;
+        }
+
+        const tlsUrl = normalizeTlsUrl(tlsUrlInput.value);
+        if (!tlsUrl.valid) {
+            setSaveStatus(`Открытие отменено: ${tlsUrl.reason}`, true);
+            return;
+        }
+
+        chrome.tabs.create({ url: getTlsStartUrl(tlsUrl.value) || tlsUrl.value });
     });
 
     // Обновить страницу вручную
@@ -513,11 +847,54 @@ please check this page regularly`;
     });
 
     // Сохранение при изменении URL
-    tlsUrlInput.addEventListener('change', saveSettings);
+    tlsUrlInput.addEventListener('input', () => validateInputs(true));
+    tlsUrlInput.addEventListener('change', async () => {
+        validateInputs(true);
+        try {
+            await saveSettings();
+        } catch (error) {
+            setSaveStatus(error.message, true);
+        }
+    });
+
+    loginUrlInput.addEventListener('input', () => validateInputs(true));
+    loginUrlInput.addEventListener('change', async () => {
+        validateInputs(true);
+        try {
+            await saveSettings();
+        } catch (error) {
+            setSaveStatus(error.message, true);
+        }
+    });
+
+    loginEmailInput.addEventListener('change', async () => {
+        validateInputs(true);
+        try {
+            await saveSettings();
+        } catch (error) {
+            setSaveStatus(error.message, true);
+        }
+    });
+
+    loginPasswordInput.addEventListener('change', async () => {
+        validateInputs(true);
+        try {
+            await saveSettings();
+        } catch (error) {
+            setSaveStatus(error.message, true);
+        }
+    });
 
     // Тест Telegram
     testBtn.addEventListener('click', async () => {
-        await saveSettings();
+        try {
+            await saveSettings();
+        } catch (error) {
+            validateInputs(true);
+            setSaveStatus(error.message, true);
+            return;
+        }
+
         testBtn.textContent = '⏳ Отправка...';
         testBtn.disabled = true;
 
@@ -560,6 +937,7 @@ please check this page regularly`;
 // ================================================
 // Сгенерировано: ${new Date().toLocaleString('ru-RU')}
 // URL: ${tlsUrlInput.value}
+    // Telegram токен намеренно не экспортируется из расширения
 // ================================================
 
 (function() {
@@ -571,8 +949,8 @@ please check this page regularly`;
         refreshIntervalSeconds: 1000,  // ~17 минут - защита от бана
         soundEnabled: ${isToggleActive(soundToggle)},
         telegramEnabled: ${isToggleActive(telegramToggle)},
-        telegramBotToken: '${botTokenInput.value}',
-        telegramChatIds: [${chatIdsArray.map(id => `'${id}'`).join(', ')}]
+        telegramBotToken: '',
+        telegramChatIds: []
     };
     
     const NO_SLOTS_KEYWORDS = ${JSON.stringify(noSlotsKeywordsInput.value.split('\\n').map(k => k.trim()).filter(k => k))};
@@ -658,7 +1036,9 @@ please check this page regularly`;
         // 🚨 ПРОВЕРКА НА CLOUDFLARE БАН
         if (pageText.includes('error 1015') || pageText.includes('rate limited') || 
             pageText.includes('you are being rate limited') || pageText.includes('access denied') ||
-            pageText.includes('too many requests') || pageText.includes('captcha')) {
+            pageText.includes('too many requests') || pageText.includes('captcha') ||
+            pageText.includes('sorry, you have been blocked') || pageText.includes('you have been blocked') ||
+            pageText.includes('unable to access')) {
             console.error('🚨 ОБНАРУЖЕН БАН CLOUDFLARE!');
             isRunning = false;
             document.title = '🚨 ЗАБАНЕН!';
@@ -842,41 +1222,30 @@ please check this page regularly`;
 
     copyScriptBtn.addEventListener('click', async () => {
         const script = generateConsoleScript();
-        const originalHTML = copyScriptBtn.innerHTML;
+        await copyTextWithFeedback(copyScriptBtn, script, '<span class="icon">✅</span>OK!');
+    });
 
-        // Пробуем Clipboard API
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            try {
-                await navigator.clipboard.writeText(script);
-                copyScriptBtn.innerHTML = '<span class="icon">✅</span>OK!';
-                setTimeout(() => { copyScriptBtn.innerHTML = originalHTML; }, 2000);
-                return;
-            } catch (e) {
-                console.warn('Clipboard API failed:', e);
-            }
-        }
+    copyDebugBtn.addEventListener('click', async () => {
+        const debugPayload = buildDiagnosticExport(buildDebugSnapshot());
+        await copyTextWithFeedback(copyDebugBtn, debugPayload, '✅ Скопировано');
+    });
 
-        // Резервный метод через textarea
-        try {
-            const textarea = document.createElement('textarea');
-            textarea.value = script;
-            textarea.style.position = 'fixed';
-            textarea.style.left = '-9999px';
-            document.body.appendChild(textarea);
-            textarea.focus();
-            textarea.select();
-            const success = document.execCommand('copy');
-            document.body.removeChild(textarea);
+    exportLogsBtn.addEventListener('click', async () => {
+        const exportPayload = buildDiagnosticExport(buildDebugSnapshot());
+        const blob = new Blob([exportPayload], { type: 'application/json' });
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = `tls-monitor-debug-${Date.now()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
 
-            if (success) {
-                copyScriptBtn.innerHTML = '<span class="icon">✅</span>OK!';
-            } else {
-                copyScriptBtn.innerHTML = '<span class="icon">❌</span>Ошибка';
-            }
-        } catch (e) {
-            copyScriptBtn.innerHTML = '<span class="icon">❌</span>Ошибка';
-        }
-
-        setTimeout(() => { copyScriptBtn.innerHTML = originalHTML; }, 2000);
+        const originalHTML = exportLogsBtn.innerHTML;
+        exportLogsBtn.innerHTML = '✅ Exported';
+        setTimeout(() => {
+            exportLogsBtn.innerHTML = originalHTML;
+        }, 2000);
     });
 });

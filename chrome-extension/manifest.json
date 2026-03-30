@@ -12,7 +12,10 @@
         "tabs"
     ],
     "host_permissions": [
-        "<all_urls>"
+        "http://tlscontact.com/*",
+        "https://tlscontact.com/*",
+        "https://*.tlscontact.com/*",
+        "https://api.telegram.org/*"
     ],
     "action": {
         "default_popup": "popup.html",
@@ -23,7 +26,8 @@
         }
     },
     "background": {
-        "service_worker": "background.js"
+        "service_worker": "background.js",
+        "type": "module"
     },
     "icons": {
         "16": "icon16.png",

@@ -1,6 +1,210 @@
+import './state-machine.js';
+import './diagnostic-logger.js';
+
+const {
+    TLS_PAGE_STATES,
+    normalizeTlsUrlValue,
+    analyzeTlsPageState,
+    canTransitionMonitorState,
+    isTlsLandingPath
+} = self;
+
+const {
+    appendDiagnosticLog
+} = self;
+
+const NAVIGATION_LOOP_WINDOW_MS = 3 * 60 * 1000;
+const NAVIGATION_LOOP_THRESHOLD = 4;
+
+function getUrlHostname(rawUrl) {
+    try {
+        return new URL(rawUrl).hostname.toLowerCase();
+    } catch (error) {
+        return '';
+    }
+}
+
+function isTlsSubdomainHost(hostname) {
+    return hostname === 'tlscontact.com' || hostname.endsWith('.tlscontact.com');
+}
+
+function isScriptableTlsUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl);
+        return (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && parsed.hostname === 'tlscontact.com'))
+            && isTlsSubdomainHost(parsed.hostname.toLowerCase());
+    } catch (error) {
+        return false;
+    }
+}
+
+function scoreTlsCandidate(tabUrl, tlsUrl, loginUrl) {
+    if (!tabUrl || !isScriptableTlsUrl(tabUrl)) {
+        return -1;
+    }
+
+    const tab = new URL(tabUrl);
+    const target = tlsUrl ? new URL(tlsUrl) : null;
+    const login = loginUrl ? new URL(loginUrl) : null;
+    let score = 0;
+
+    if (target && tab.href === target.href) score += 100;
+    if (target && tab.hostname === target.hostname) score += 40;
+    if (target && tab.pathname === target.pathname) score += 25;
+    if (target && tab.pathname.includes('appointment-booking')) score += 30;
+    if (target && tab.pathname.includes('workflow')) score += 15;
+    if (login && tab.hostname === login.hostname) score += 10;
+    if (tab.hostname.startsWith('auth.')) score += 5;
+    if (tab.hostname === 'tlscontact.com') score -= 50;
+    if (tab.protocol === 'http:') score -= 20;
+
+    return score;
+}
+
+function urlsMatchIgnoringHash(leftUrl, rightUrl) {
+    try {
+        const left = new URL(leftUrl);
+        const right = new URL(rightUrl);
+        left.hash = '';
+        right.hash = '';
+        return left.href === right.href;
+    } catch (error) {
+        return false;
+    }
+}
+
+function getTlsStartUrl(tlsUrl) {
+    try {
+        const target = new URL(tlsUrl);
+        return `${target.origin}/en-us`;
+    } catch (error) {
+        return '';
+    }
+}
+
+function shouldForceReturnToTlsUrl(currentUrl, tlsUrl, startUrl = '') {
+    if (!currentUrl || !tlsUrl || urlsMatchIgnoringHash(currentUrl, tlsUrl)) {
+        return false;
+    }
+
+    if (startUrl && urlsMatchIgnoringHash(currentUrl, startUrl)) {
+        return false;
+    }
+
+    try {
+        const current = new URL(currentUrl);
+        const target = new URL(tlsUrl);
+        const pathname = current.pathname.toLowerCase();
+        const sameTlsHost = current.hostname.toLowerCase() === target.hostname.toLowerCase();
+        const isLanding = isTlsLandingPath(pathname);
+        const isAppointmentLike = pathname.includes('appointment') || pathname.includes('booking') || pathname.includes('schedule');
+        const isAuthLike = current.hostname.startsWith('auth.') || pathname.includes('auth') || pathname.includes('login');
+        const isTravelGroups = pathname.includes('travel-groups');
+
+        return sameTlsHost && isLanding && !isAppointmentLike && !isAuthLike && !isTravelGroups;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function ensureMonitoringTab(tlsUrl, loginUrl = '') {
+    const allTabs = await chrome.tabs.query({});
+    const bestExistingTlsTab = allTabs
+        .filter((tab) => Boolean(tab.url))
+        .map((tab) => ({ tab, score: scoreTlsCandidate(tab.url, tlsUrl, loginUrl) }))
+        .filter((candidate) => candidate.score >= 0)
+        .sort((left, right) => right.score - left.score)[0]?.tab || null;
+
+    if (!bestExistingTlsTab) {
+        console.log('🌐 Открываем страницу TLS:', tlsUrl);
+        const createdTab = await chrome.tabs.create({ url: tlsUrl, active: true });
+        await new Promise(r => setTimeout(r, 3000));
+        return createdTab;
+    }
+
+    const currentUrl = bestExistingTlsTab.url || '';
+    if (currentUrl !== tlsUrl) {
+        console.log('↪️ Переводим существующую вкладку на страницу записи:', tlsUrl);
+        await chrome.tabs.update(bestExistingTlsTab.id, { url: tlsUrl, active: true });
+        await new Promise(r => setTimeout(r, 3000));
+        return await safeGetTab(bestExistingTlsTab.id);
+    }
+
+    await chrome.tabs.update(bestExistingTlsTab.id, { active: true });
+    console.log('✅ Активируем вкладку страницы записи:', bestExistingTlsTab.id, currentUrl);
+    return bestExistingTlsTab;
+}
+
+async function clearNavigationLoopGuard() {
+    await chrome.storage.local.remove('navigationLoopGuard');
+}
+
+async function clearManualAuthState() {
+    await chrome.storage.local.remove(['authManualPending', 'authTabId']);
+}
+
+async function setManualAuthState(tabId) {
+    await chrome.storage.local.set({
+        authManualPending: true,
+        authTabId: tabId || null
+    });
+}
+
+async function registerNavigationLoopGuard(stage, currentUrl, tabId, recursionDepth) {
+    const normalizedUrl = currentUrl || '';
+    const normalizedStage = stage || 'unknown';
+    const now = Date.now();
+    const { navigationLoopGuard = null } = await chrome.storage.local.get('navigationLoopGuard');
+
+    // Match on stage + tabId (not exact URL) to catch loops with minor URL variations
+    const sameLoop = navigationLoopGuard &&
+        navigationLoopGuard.stage === normalizedStage &&
+        navigationLoopGuard.tabId === (tabId || null) &&
+        (now - navigationLoopGuard.updatedAt) < NAVIGATION_LOOP_WINDOW_MS;
+
+    const nextGuard = {
+        stage: normalizedStage,
+        url: normalizedUrl,
+        tabId: tabId || null,
+        recursionDepth,
+        count: sameLoop ? (navigationLoopGuard.count || 0) + 1 : 1,
+        updatedAt: now,
+        firstSeenAt: sameLoop ? navigationLoopGuard.firstSeenAt : now
+    };
+
+    await chrome.storage.local.set({ navigationLoopGuard: nextGuard });
+    await appendDiagnosticLog('navigation_loop_guard', nextGuard);
+    return nextGuard;
+}
+
 // Background Service Worker v5.0
 let lastNotificationTime = 0;
 const NOTIFICATION_COOLDOWN = 5 * 60 * 1000;
+const TELEGRAM_POLL_INTERVAL_MINUTES = 1;
+const TELEGRAM_LONG_POLL_TIMEOUT_SEC = 20;
+let startMonitoringPromise = null;
+
+async function getAutoLoginCredentials() {
+    const [persistentSettings, sessionSecrets] = await Promise.all([
+        chrome.storage.local.get(['autoLogin', 'loginEmail', 'loginPassword']),
+        chrome.storage.session.get(['loginPassword'])
+    ]);
+
+    const persistedPassword = String(persistentSettings.loginPassword || '').trim();
+    const sessionPassword = sessionSecrets.loginPassword || '';
+    const loginPassword = persistedPassword || String(sessionPassword || '').trim();
+    const loginEmail = String(persistentSettings.loginEmail || '').trim();
+
+    if (!persistedPassword && sessionPassword) {
+        await chrome.storage.local.set({ loginPassword: sessionPassword });
+    }
+
+    return {
+        autoLogin: persistentSettings.autoLogin === true,
+        loginEmail,
+        loginPassword
+    };
+}
 
 // === ANTI-RATE-LIMITING (хранится в storage для сохранения при сне worker) ===
 const MIN_INTERVAL_SEC = 300; // Minimum 5 minutes between checks (безопасный интервал)
@@ -125,7 +329,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Запуск при старте браузера
 chrome.runtime.onStartup.addListener(async () => {
-    const { isRunning } = await chrome.storage.local.get('isRunning');
+    const { isRunning, botToken } = await chrome.storage.local.get(['isRunning', 'botToken']);
+    if (botToken) {
+        startTelegramPolling();
+    }
     if (isRunning) {
         startMonitoring();
     }
@@ -142,11 +349,13 @@ chrome.runtime.onInstalled.addListener(async () => {
 let telegramOffset = 0;
 
 async function startTelegramPolling() {
-    const { botToken } = await chrome.storage.local.get('botToken');
+    const { botToken, telegramOffset: storedOffset = 0 } = await chrome.storage.local.get(['botToken', 'telegramOffset']);
     if (!botToken) {
         console.log('🤖 Telegram: токен не указан');
         return;
     }
+
+    telegramOffset = storedOffset;
 
     console.log('🤖 Telegram Polling запущен (через chrome.alarms)');
 
@@ -174,10 +383,10 @@ async function startTelegramPolling() {
     // Останавливаем старый alarm если есть
     await chrome.alarms.clear('telegramPolling');
 
-    // Создаём alarm для polling каждые 5 секунд (быстрый ответ на команды)
+    // Создаём alarm для polling раз в минуту. Дальше getUpdates использует long-poll.
     await chrome.alarms.create('telegramPolling', {
-        delayInMinutes: 0.05,   // Первый запуск через 3 секунды
-        periodInMinutes: 0.083  // Каждые 5 секунд (5/60 = 0.083)
+        delayInMinutes: TELEGRAM_POLL_INTERVAL_MINUTES,
+        periodInMinutes: TELEGRAM_POLL_INTERVAL_MINUTES
     });
 
     pollTelegram(); // Первый запрос сразу
@@ -188,7 +397,7 @@ async function pollTelegram() {
         const { botToken } = await chrome.storage.local.get('botToken');
         if (!botToken) return;
 
-        const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${telegramOffset}&timeout=1`;
+        const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${telegramOffset}&timeout=${TELEGRAM_LONG_POLL_TIMEOUT_SEC}`;
         const response = await fetch(url);
         const data = await response.json();
 
@@ -197,9 +406,11 @@ async function pollTelegram() {
                 telegramOffset = update.update_id + 1;
                 await handleTelegramMessage(update, botToken);
             }
+
+            await chrome.storage.local.set({ telegramOffset });
         }
     } catch (e) {
-        // Тихая ошибка
+        console.warn('⚠️ Telegram polling error:', e.message || e);
     }
 }
 
@@ -297,7 +508,35 @@ async function handleTelegramMessage(update, botToken) {
 }
 
 async function startMonitoring() {
-    const settings = await chrome.storage.local.get(['checkInterval', 'tlsUrl']);
+    if (startMonitoringPromise) {
+        await appendDiagnosticLog('monitor_start_skipped', { reason: 'start_already_in_progress' });
+        return startMonitoringPromise;
+    }
+
+    startMonitoringPromise = (async () => {
+    const settings = await chrome.storage.local.get(['checkInterval', 'tlsUrl', 'loginUrl']);
+    if (!normalizeTlsUrlValue(settings.tlsUrl).valid) {
+        console.error('❌ Невалидный tlsUrl. Мониторинг не запущен.');
+        await appendDiagnosticLog('monitor_start_rejected', { reason: 'invalid_tls_url', tlsUrl: settings.tlsUrl || '' });
+        await setMonitorState(TLS_PAGE_STATES.ERROR, 'Невалидный TLS URL при запуске');
+        await chrome.storage.local.set({ isRunning: false });
+        return;
+    }
+
+    const [isRunningState, checkSlotsAlarm, keepAliveAlarm] = await Promise.all([
+        chrome.storage.local.get('isRunning'),
+        chrome.alarms.get('checkSlots'),
+        chrome.alarms.get('keepAlive')
+    ]);
+
+    if (isRunningState.isRunning && checkSlotsAlarm && keepAliveAlarm) {
+        await appendDiagnosticLog('monitor_start_skipped', {
+            reason: 'already_running',
+            tlsUrl: settings.tlsUrl || ''
+        });
+        return;
+    }
+
     // Enforce minimum interval и добавляем jitter
     const baseInterval = Math.max(settings.checkInterval || 120, MIN_INTERVAL_SEC);
     const jitter = getRandomJitter();
@@ -306,22 +545,22 @@ async function startMonitoring() {
 
     console.log('🚀 Slot Monitor: Запуск мониторинга');
     console.log(`⏱️ Интервал: ${baseInterval} сек + ${jitter} сек jitter = ${totalIntervalSec} сек`);
+    await appendDiagnosticLog('monitor_starting', {
+        tlsUrl: settings.tlsUrl,
+        baseInterval,
+        jitter,
+        totalIntervalSec
+    });
 
     lastNotificationTime = 0;
     await chrome.storage.local.set({ rateLimitBackoff: 0 }); // Reset backoff on manual start
+    await clearNavigationLoopGuard();
+    await clearManualAuthState();
+    await chrome.alarms.clear('checkSlots');
+    await chrome.alarms.clear('keepAlive');
 
-    // 🆕 Автоматически открыть страницу TLS если её нет
-    const allTabs = await chrome.tabs.query({});
-    const hasTlsTab = allTabs.some(tab => tab.url && tab.url.includes('tlscontact.com'));
-
-    if (!hasTlsTab) {
-        // Всегда открываем базовую страницу (не appointment-booking)
-        const startUrl = 'https://visas-it.tlscontact.com/en-us/';
-        console.log('🌐 Открываем страницу TLS:', startUrl);
-        await chrome.tabs.create({ url: startUrl, active: true });
-        // Ждём загрузки страницы
-        await new Promise(r => setTimeout(r, 3000));
-    }
+    const startUrl = getTlsStartUrl(settings.tlsUrl);
+    await ensureMonitoringTab(startUrl || settings.tlsUrl, settings.loginUrl);
 
     // Запуск Telegram polling
     startTelegramPolling();
@@ -339,17 +578,29 @@ async function startMonitoring() {
     });
 
     await chrome.storage.local.set({ isRunning: true });
+    await setMonitorState(TLS_PAGE_STATES.RUNNING, 'Мониторинг запущен');
+    })();
+
+    try {
+        return await startMonitoringPromise;
+    } finally {
+        startMonitoringPromise = null;
+    }
 }
 
-function stopMonitoring() {
+async function stopMonitoring() {
     console.log('🛑 Slot Monitor: Остановка');
-    chrome.alarms.clear('checkSlots');
-    chrome.alarms.clear('keepAlive');
+    await chrome.alarms.clear('checkSlots');
+    await chrome.alarms.clear('keepAlive');
     // ⚠️ НЕ останавливаем telegramPolling, чтобы можно было удалённо запустить через /on
     // chrome.alarms.clear('telegramPolling');
     console.log('🤖 Мониторинг остановлен (Telegram polling активен)');
 
-    chrome.storage.local.set({ isRunning: false });
+    await chrome.storage.local.set({ isRunning: false });
+    await clearNavigationLoopGuard();
+    await clearManualAuthState();
+    await appendDiagnosticLog('monitor_stopped', { reason: 'manual_or_remote_stop' });
+    await setMonitorState(TLS_PAGE_STATES.STOPPED, 'Мониторинг остановлен');
 }
 
 // Обработчик alarm (включая Telegram polling)
@@ -365,8 +616,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // Keep-Alive: имитация активности человека на странице (БЕЗОПАСНАЯ ВЕРСИЯ)
 async function keepSessionAlive() {
-    const { isRunning, tlsUrl } = await chrome.storage.local.get(['isRunning', 'tlsUrl']);
+    const { isRunning, tlsUrl, authManualPending } = await chrome.storage.local.get(['isRunning', 'tlsUrl', 'authManualPending']);
     if (!isRunning || !tlsUrl) return;
+
+    if (authManualPending) {
+        console.log('⏸️ Keep-alive пропущен: ожидается ручной логин');
+        return;
+    }
 
     // 🛡️ Не отправляем keep-alive при rate limit
     if (await isRateLimited()) {
@@ -475,23 +731,29 @@ async function keepSessionAlive() {
     }
 }
 
-// 🧨 HARD RESET: Закрыть вкладку и начать заново
+// 🧨 HARD RESET: мягкий сброс без физического закрытия вкладки
 async function hardResetAndRestart(tabId, reason) {
     console.log(`🧨 HARD RESET TRIGGERED: ${reason}`);
     await sendTelegramMessage(`🔄 <b>АВТО-СБРОС</b>\n\nПричина: ${reason}\n\nПерезапускаю процесс...`);
+    await clearNavigationLoopGuard();
+    await clearManualAuthState();
 
     try {
         if (tabId) {
             const tab = await safeGetTab(tabId);
             if (tab) {
-                await chrome.tabs.remove(tabId);
-                console.log('🧨 Вкладка закрыта');
+                await appendDiagnosticLog('hard_reset_tab_preserved', {
+                    tabId,
+                    url: tab.url || '',
+                    reason
+                });
+                console.log('🧨 Вкладка сохранена, физическое закрытие отключено');
             } else {
-                console.log('🧨 Вкладка уже была закрыта');
+                console.log('🧨 Вкладка уже недоступна');
             }
         }
     } catch (e) {
-        console.error('❌ Ошибка закрытия вкладки:', e.message);
+        console.error('❌ Ошибка мягкого сброса вкладки:', e.message);
     }
 
     // Даем браузеру время и сбрасываем состояние
@@ -500,6 +762,119 @@ async function hardResetAndRestart(tabId, reason) {
     // Перезапуск мониторинга (он сам откроет вкладку)
     console.log('🚀 Перезапуск startMonitoring()...');
     await startMonitoring();
+}
+
+async function setMonitorState(state, reason = '') {
+    const { monitorState: previousState = TLS_PAGE_STATES.IDLE } = await chrome.storage.local.get('monitorState');
+    let nextState = state;
+    let nextReason = reason;
+
+    if (!canTransitionMonitorState(previousState, state)) {
+        await appendDiagnosticLog('invalid_transition', {
+            from: previousState,
+            to: state,
+            reason: reason || ''
+        });
+        nextState = TLS_PAGE_STATES.ERROR;
+        nextReason = `Недопустимый переход ${previousState} -> ${state}${reason ? `: ${reason}` : ''}`;
+    }
+
+    await chrome.storage.local.set({ monitorState: nextState, monitorReason: nextReason });
+    await appendDiagnosticLog('state_transition', {
+        from: previousState,
+        to: nextState,
+        reason: nextReason || ''
+    });
+
+    return { previousState, state: nextState, reason: nextReason };
+}
+
+async function setLastDiagnostic(snapshot = {}) {
+    await chrome.storage.local.set({
+        lastDiagnostic: {
+            checkedAt: new Date().toISOString(),
+            ...snapshot
+        }
+    });
+}
+
+async function handlePageAnalysisResult(targetTabId, analysis) {
+    const { state, reason, textLength } = analysis;
+    const monitorUpdate = await setMonitorState(state, reason);
+    await setLastDiagnostic({
+        tabId: targetTabId,
+        state: monitorUpdate.state,
+        reason: monitorUpdate.reason,
+        textLength,
+        url: analysis.url || '',
+        matchedKeyword: analysis.matchedKeyword || '',
+        debugText: analysis.debugText || ''
+    });
+    await appendDiagnosticLog('analysis_result', {
+        tabId: targetTabId,
+        state: monitorUpdate.state,
+        reason: monitorUpdate.reason,
+        textLength,
+        url: analysis.url || '',
+        matchedKeyword: analysis.matchedKeyword || ''
+    });
+
+    switch (monitorUpdate.state) {
+        case TLS_PAGE_STATES.AUTH_ERROR:
+            console.log('🚨 Auth Error detected (invalid_grant) -> Hard Reset');
+            await hardResetAndRestart(targetTabId, 'Auth Error: invalid_grant');
+            return;
+
+        case TLS_PAGE_STATES.RATE_LIMITED: {
+            console.log('🚫🚫🚫 RATE LIMIT ОБНАРУЖЕН! 🚫🚫🚫');
+            await handleRateLimit();
+            const afterBackoff = (await chrome.storage.local.get('rateLimitBackoff')).rateLimitBackoff;
+            await addHistoryEntry('error', `⚠️ Rate limit! Ждём ${afterBackoff} мин...`);
+            await sendTelegramMessage(
+                `🚫 <b>RATE LIMIT!</b>\n\n` +
+                `Cloudflare заблокировал запросы.\n\n` +
+                `⏳ Пауза: <b>${afterBackoff} мин</b>\n\n` +
+                `Бот автоматически продолжит после паузы.`
+            );
+            return;
+        }
+
+        case TLS_PAGE_STATES.CAPTCHA:
+            console.log('🧩🧩🧩 CAPTCHA ОБНАРУЖЕНА! 🧩🧩🧩');
+            await addHistoryEntry('error', '🧩 CAPTCHA! Зайдите в браузер');
+            await sendTelegramMessage(
+                `🧩 <b>CAPTCHA!</b>\n\n` +
+                `Cloudflare требует проверку.\n\n` +
+                `⚡ <b>Зайдите в браузер и пройдите проверку вручную!</b>\n\n` +
+                `После прохождения бот продолжит работу.`
+            );
+            return;
+
+        case TLS_PAGE_STATES.LOADING:
+            if (textLength < 300) {
+                console.log(`⚠️ Текст слишком короткий (${textLength} символов), страница не загружена`);
+            }
+            await addHistoryEntry('skip', 'Страница загружается...');
+            return;
+
+        case TLS_PAGE_STATES.NO_SLOTS:
+            await addHistoryEntry('no_slots', 'Слотов нет');
+            console.log('❌ Слотов нет');
+            return;
+
+        case TLS_PAGE_STATES.POTENTIAL_SLOTS:
+            await addHistoryEntry('slots', '🎉 СЛОТЫ НАЙДЕНЫ!');
+            await handleSlotsFound();
+            return;
+
+        case TLS_PAGE_STATES.AUTH:
+        case TLS_PAGE_STATES.WRONG_PAGE:
+        case TLS_PAGE_STATES.ERROR:
+        default:
+            await addHistoryEntry('skip', reason || 'Проверка завершена без действия');
+            console.log('ℹ️ Состояние страницы:', state, reason);
+            return;
+    }
 }
 
 async function checkForSlots(recursionDepth = 0) {
@@ -513,11 +888,33 @@ async function checkForSlots(recursionDepth = 0) {
         return;
     }
 
-    const { isRunning, tlsUrl, autoRefresh } = await chrome.storage.local.get(['isRunning', 'tlsUrl', 'autoRefresh']);
+    const { isRunning, tlsUrl, autoRefresh, authManualPending = false, authTabId = null } = await chrome.storage.local.get(['isRunning', 'tlsUrl', 'autoRefresh', 'authManualPending', 'authTabId']);
     console.log('📊 Настройки:', { isRunning, tlsUrl: tlsUrl?.substring(0, 50) + '...', autoRefresh });
+    await appendDiagnosticLog('check_started', {
+        recursionDepth,
+        tlsUrl: tlsUrl || '',
+        autoRefresh: autoRefresh === true
+    });
 
     if (!isRunning) {
         console.log('⏸️ Мониторинг не запущен, выход');
+        return;
+    }
+
+    if (!normalizeTlsUrlValue(tlsUrl).valid) {
+        console.error('❌ Проверка остановлена: tlsUrl вне разрешённого домена TLS Contact');
+        await setMonitorState(TLS_PAGE_STATES.ERROR, 'Некорректный TLS URL в настройках');
+        await setLastDiagnostic({
+            state: TLS_PAGE_STATES.ERROR,
+            reason: 'Некорректный TLS URL в настройках',
+            textLength: 0,
+            url: tlsUrl || '',
+            matchedKeyword: '',
+            debugText: ''
+        });
+        await appendDiagnosticLog('check_rejected', { reason: 'invalid_tls_url', tlsUrl: tlsUrl || '' });
+        await addHistoryEntry('error', 'Некорректный TLS URL в настройках');
+        await chrome.storage.local.set({ isRunning: false });
         return;
     }
 
@@ -531,6 +928,7 @@ async function checkForSlots(recursionDepth = 0) {
 
     console.log('✅ Rate limit: OK, продолжаем');
     console.log('🔗 Целевой URL:', tlsUrl || '(не задан)');
+    const startUrl = getTlsStartUrl(tlsUrl);
 
     // Получаем ВСЕ вкладки
     const allTabs = await chrome.tabs.query({});
@@ -542,40 +940,25 @@ async function checkForSlots(recursionDepth = 0) {
         try {
             const userUrl = new URL(tlsUrl);
             const hostname = userUrl.hostname.toLowerCase();
-            // Получаем корневой домен (например, tlscontact.com)
-            const parts = hostname.split('.');
-            const rootDomain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+            const { loginUrl = '' } = await chrome.storage.local.get('loginUrl');
+            console.log('🌐 Ищем вкладки с доменом:', hostname);
 
-            console.log('🌐 Ищем вкладки с доменом:', hostname, '(root:', rootDomain + ')');
+            const rankedCandidates = allTabs
+                .filter((tab) => Boolean(tab.url))
+                .map((tab) => ({ tab, score: scoreTlsCandidate(tab.url, tlsUrl, loginUrl) }))
+                .filter((candidate) => candidate.score >= 0)
+                .sort((left, right) => right.score - left.score);
 
-            // 1. Сначала ищем точное совпадение хоста
-            for (const tab of allTabs) {
-                if (tab.url && tab.url.toLowerCase().includes(hostname)) {
-                    targetTab = tab;
-                    console.log('✅ Найдена вкладка (хост):', tab.id, tab.url);
-                    break;
-                }
+            if (rankedCandidates.length > 0) {
+                targetTab = rankedCandidates[0].tab;
+                console.log('✅ Найдена лучшая TLS вкладка:', targetTab.id, targetTab.url);
             }
 
-            // 2. Если не нашли, ищем по корневому домену (на случай редиректа на login.domain.com)
-            if (!targetTab) {
-                for (const tab of allTabs) {
-                    if (tab.url && tab.url.toLowerCase().includes(rootDomain)) {
-                        targetTab = tab;
-                        console.log('⚠️ Найдена вкладка (root domain):', tab.id, tab.url.substring(0, 80));
-                        break;
-                    }
-                }
-            }
-
-            // 3. Ищем auth.* поддомен (страница логина)
-            if (!targetTab) {
-                for (const tab of allTabs) {
-                    if (tab.url && tab.url.toLowerCase().includes('auth.') && tab.url.toLowerCase().includes('tlscontact')) {
-                        targetTab = tab;
-                        console.log('🔐 Найдена вкладка (auth login):', tab.id, tab.url.substring(0, 80));
-                        break;
-                    }
+            if (authManualPending && authTabId) {
+                const manualAuthTab = rankedCandidates.find((candidate) => candidate.tab.id === authTabId)?.tab || await safeGetTab(authTabId);
+                if (manualAuthTab) {
+                    targetTab = manualAuthTab;
+                    console.log('🔐 Используем auth-вкладку для ручного логина:', targetTab.id, targetTab.url);
                 }
             }
         } catch (e) {
@@ -584,14 +967,72 @@ async function checkForSlots(recursionDepth = 0) {
     }
 
     if (!targetTab) {
-        console.log('⚠️ Вкладка не найдена. Откройте сайт в браузере.');
-        await addHistoryEntry('skip', 'Вкладка TLS не найдена');
-        const stats = await chrome.storage.local.get(['checkCount']);
-        await chrome.storage.local.set({
-            checkCount: (stats.checkCount || 0) + 1,
-            lastCheck: new Date().toLocaleTimeString('ru-RU')
+        console.log('⚠️ Подходящая TLS вкладка не найдена. Открываем целевой URL.');
+        targetTab = await chrome.tabs.create({ url: tlsUrl, active: true });
+        await new Promise(r => setTimeout(r, 3000));
+    }
+
+    if (!isScriptableTlsUrl(targetTab.url || '')) {
+        console.log('↪️ Текущая вкладка не подходит для scripting, перенаправляем на tlsUrl:', targetTab.url);
+        await appendDiagnosticLog('retarget_to_tls_url', {
+            fromUrl: targetTab.url || '',
+            toUrl: tlsUrl || ''
         });
+        await chrome.tabs.update(targetTab.id, { url: tlsUrl });
+        await waitForPageLoad(targetTab.id, 10000);
+        await new Promise(r => setTimeout(r, 1500));
+        targetTab = await safeGetTab(targetTab.id);
+        if (!targetTab) {
+            await addHistoryEntry('error', 'Вкладка TLS потеряна после редиректа');
+            return;
+        }
+    }
+
+    const targetTabUrl = targetTab.url || '';
+    const isAuthTabNow = targetTabUrl.includes('/auth') || targetTabUrl.includes('auth.');
+    if (authManualPending && authTabId === targetTab.id && isAuthTabNow) {
+        await setMonitorState(TLS_PAGE_STATES.AUTH, 'Ожидание ручного логина');
+        await setLastDiagnostic({
+            tabId: targetTab.id,
+            state: TLS_PAGE_STATES.AUTH,
+            reason: 'Ожидание ручного логина',
+            textLength: 0,
+            url: targetTabUrl,
+            matchedKeyword: '',
+            debugText: ''
+        });
+        await appendDiagnosticLog('auth_waiting_user', {
+            tabId: targetTab.id,
+            url: targetTabUrl
+        });
+        console.log('⏸️ Auth-вкладка оставлена пользователю для ручного входа');
         return;
+    }
+
+    if (authManualPending && (!authTabId || authTabId === targetTab.id) && !isAuthTabNow) {
+        await clearManualAuthState();
+        await appendDiagnosticLog('auth_manual_completed_or_left', {
+            tabId: targetTab.id,
+            url: targetTabUrl
+        });
+
+        // After manual login, navigate to post-login page if configured
+        const { postLoginUrl = '' } = await chrome.storage.local.get('postLoginUrl');
+        if (postLoginUrl) {
+            console.log('📄 Ручной логин завершён, переходим на post-login страницу:', postLoginUrl);
+            await appendDiagnosticLog('post_login_navigate', {
+                tabId: targetTab.id,
+                postLoginUrl,
+                trigger: 'manual_auth'
+            });
+            await chrome.tabs.update(targetTab.id, { url: postLoginUrl, active: true });
+            await waitForPageLoad(targetTab.id, 10000);
+            await new Promise(r => setTimeout(r, 2000));
+        }
+    }
+
+    if (recursionDepth === 0) {
+        await clearNavigationLoopGuard();
     }
 
     // 🔄 AUTO-REFRESH: Обновляем страницу перед проверкой (БЕЗОПАСНЫЙ МЕТОД)
@@ -625,6 +1066,7 @@ async function checkForSlots(recursionDepth = 0) {
 
             // Ждём загрузки страницы
             await waitForPageLoad(targetTab.id, 5000);
+            targetTab = await safeGetTab(targetTab.id) || targetTab;
             console.log('✅ Страница обновлена');
         } catch (e) {
             console.error('🔄 Ошибка обновления страницы:', e.message);
@@ -632,6 +1074,7 @@ async function checkForSlots(recursionDepth = 0) {
             try {
                 await chrome.tabs.reload(targetTab.id);
                 await waitForPageLoad(targetTab.id, 5000);
+                targetTab = await safeGetTab(targetTab.id) || targetTab;
             } catch (e2) { }
         }
     }
@@ -665,10 +1108,12 @@ async function checkForSlots(recursionDepth = 0) {
             console.log('⚠️ ОБНАРУЖЕН ВЫХОД ИЗ СИСТЕМЫ!');
 
             // Проверяем настройки авто-логина
-            const { autoLogin, loginEmail, loginPassword } = await chrome.storage.local.get(['autoLogin', 'loginEmail', 'loginPassword']);
+            const { autoLogin, loginEmail, loginPassword } = await getAutoLoginCredentials();
 
             // Проверяем является ли это страницей логина/auth
             const isAuthPage = targetTab.url.includes('/auth') || targetTab.url.includes('auth.');
+            const isStartPage = startUrl ? urlsMatchIgnoringHash(targetTab.url, startUrl) : false;
+            const hasAutoLoginCredentials = Boolean(autoLogin && loginEmail && loginPassword);
 
             const isLandingPage = targetTab.url.includes('/vac/') ||
                 targetTab.url.includes('/travel-groups') ||
@@ -679,9 +1124,158 @@ async function checkForSlots(recursionDepth = 0) {
             if (isLandingPage) {
                 console.log('🌍 Обнаружена промежуточная/auth страница. Auth:', isAuthPage);
 
+                if (isAuthPage) {
+                    const authReason = hasAutoLoginCredentials
+                        ? 'Страница логина, запускаю авто-вход'
+                        : 'Страница логина, требуется ручной вход';
+                    if (!hasAutoLoginCredentials) {
+                        await setManualAuthState(targetTab.id);
+                        // Dump raw storage for debugging
+                        const rawStorage = await chrome.storage.local.get(['loginEmail', 'loginPassword', 'autoLogin']);
+                        await appendDiagnosticLog('auto_login_missing_credentials', {
+                            tabId: targetTab.id,
+                            url: targetTab.url,
+                            autoLogin: autoLogin === true,
+                            hasEmail: Boolean(loginEmail),
+                            hasPassword: Boolean(loginPassword),
+                            rawEmailType: typeof rawStorage.loginEmail,
+                            rawEmailLen: String(rawStorage.loginEmail || '').length,
+                            rawPassType: typeof rawStorage.loginPassword,
+                            rawPassLen: String(rawStorage.loginPassword || '').length
+                        });
+                    }
+                    await setMonitorState(TLS_PAGE_STATES.AUTH, authReason);
+                    await setLastDiagnostic({
+                        tabId: targetTab.id,
+                        state: TLS_PAGE_STATES.AUTH,
+                        reason: authReason,
+                        textLength: 0,
+                        url: targetTab.url,
+                        matchedKeyword: '',
+                        debugText: ''
+                    });
+                    await appendDiagnosticLog('auth_page_detected', {
+                        tabId: targetTab.id,
+                        url: targetTab.url,
+                        autoLogin: autoLogin === true,
+                        hasCredentials: hasAutoLoginCredentials
+                    });
+
+                    if (!hasAutoLoginCredentials) {
+                        console.log('⏸️ Нет credentials для авто-входа. Оставляем страницу логина без сброса.');
+                        return;
+                    }
+                }
+
+                const landingStage = targetTab.url.includes('/travel-groups')
+                    ? 'travel-groups'
+                    : isAuthPage
+                        ? 'auth'
+                        : isLanguagePage
+                            ? 'language'
+                            : 'landing';
+
+                const loopGuard = await registerNavigationLoopGuard(
+                    landingStage,
+                    targetTab.url,
+                    targetTab.id,
+                    recursionDepth
+                );
+
+                if (loopGuard.count >= NAVIGATION_LOOP_THRESHOLD) {
+                    const loopReason = `Навигационный цикл: ${landingStage} x${loopGuard.count}`;
+                    console.warn('🚨 Обнаружен цикл навигации:', loopGuard);
+                    await setMonitorState(TLS_PAGE_STATES.ERROR, loopReason);
+                    await setLastDiagnostic({
+                        tabId: targetTab.id,
+                        state: TLS_PAGE_STATES.ERROR,
+                        reason: loopReason,
+                        textLength: 0,
+                        url: targetTab.url,
+                        matchedKeyword: '',
+                        debugText: ''
+                    });
+                    await addHistoryEntry('error', loopReason);
+                    await hardResetAndRestart(targetTab.id, loopReason);
+                    return;
+                }
+
+                if (shouldForceReturnToTlsUrl(targetTab.url, tlsUrl, startUrl)) {
+                    // Skip redirect if we don't have auto-login credentials — site will just redirect back
+                    if (!hasAutoLoginCredentials && recursionDepth >= 1) {
+                        console.log('⏭️ Пропускаем redirect на booking — нет credentials, редирект бесполезен');
+                        await appendDiagnosticLog('landing_redirect_skipped', {
+                            fromUrl: targetTab.url,
+                            reason: 'no_credentials_would_loop',
+                            recursionDepth
+                        });
+                    } else {
+                        console.log('↪️ Возвращаем вкладку с лендинга на целевой booking URL:', tlsUrl);
+                        await appendDiagnosticLog('retarget_booking_page', {
+                            fromUrl: targetTab.url,
+                            toUrl: tlsUrl,
+                            reason: 'landing_redirect'
+                        });
+                        await chrome.tabs.update(targetTab.id, { url: tlsUrl, active: true });
+                        await waitForPageLoad(targetTab.id, 10000);
+                        await new Promise(r => setTimeout(r, 1500));
+                        return checkForSlots(recursionDepth + 1);
+                    }
+                }
+
+                if (isStartPage && autoLogin) {
+                    console.log('🔐 Стартовая страница /en-us: пробуем перейти к логину через UI');
+                    const signInResult = await safeExecuteScript({
+                        target: { tabId: targetTab.id },
+                        func: () => {
+                            const candidates = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+                            const trigger = candidates.find((element) => {
+                                const text = (element.innerText || element.textContent || '').toLowerCase().trim();
+                                const href = (element.getAttribute('href') || '').toLowerCase();
+                                return text.includes('sign in')
+                                    || text.includes('login')
+                                    || text.includes('log in')
+                                    || text.includes('connect')
+                                    || href.includes('auth')
+                                    || href.includes('login');
+                            });
+
+                            if (!trigger) {
+                                return { clicked: false };
+                            }
+
+                            trigger.click();
+                            return {
+                                clicked: true,
+                                text: (trigger.innerText || trigger.textContent || '').trim(),
+                                href: trigger.href || trigger.getAttribute('href') || ''
+                            };
+                        }
+                    });
+
+                    const signInPayload = signInResult?.[0]?.result || { clicked: false };
+                    if (signInPayload.clicked) {
+                        await appendDiagnosticLog('landing_sign_in_triggered', {
+                            tabId: targetTab.id,
+                            url: targetTab.url,
+                            text: signInPayload.text || '',
+                            href: signInPayload.href || ''
+                        });
+                        await waitForPageLoad(targetTab.id, 10000);
+                        await new Promise(r => setTimeout(r, 1500));
+                        return checkForSlots(recursionDepth + 1);
+                    }
+
+                    await appendDiagnosticLog('landing_sign_in_not_found', {
+                        tabId: targetTab.id,
+                        url: targetTab.url,
+                        reason: 'no_sign_in_trigger_found'
+                    });
+                }
+
                 // 1. Если есть прямая ссылка для входа И НЕ на travel-groups И НЕ уже на auth — редирект
                 const { loginUrl } = await chrome.storage.local.get('loginUrl');
-                if (loginUrl && loginUrl.startsWith('http') && !targetTab.url.includes('/travel-groups') && !isAuthPage) {
+                if (loginUrl && normalizeTlsUrlValue(loginUrl).valid && !targetTab.url.includes('/travel-groups') && !isAuthPage) {
                     console.log('🔄 Перенаправление на страницу входа:', loginUrl);
                     await chrome.tabs.update(targetTab.id, { url: loginUrl });
                     console.log('⏳ Ожидаем загрузку страницы логина...');
@@ -695,32 +1289,54 @@ async function checkForSlots(recursionDepth = 0) {
                 if (targetTab.url.includes('/travel-groups')) {
                     console.log('🖱️ Страница travel-groups — ищем кнопку Select...');
                     try {
-                        await safeExecuteScript({
+                        const clickResult = await safeExecuteScript({
                             target: { tabId: targetTab.id },
                             func: () => {
                                 const allElements = Array.from(document.querySelectorAll('button, a, [role="button"], .btn'));
                                 const selectBtn = allElements.find(el => {
-                                    const text = (el.innerText || '').toLowerCase().trim();
-                                    return text === 'select' || text.includes('select');
+                                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                    return text === 'select' || text.includes('select')
+                                        || text === 'ընտրել' || text.includes('ընտրել');
                                 });
                                 if (selectBtn) {
                                     console.log('✅ Кликаем Select:', selectBtn.innerText);
                                     selectBtn.click();
-                                    return true;
+                                    return { clicked: true, text: (selectBtn.innerText || '').trim() };
                                 }
-                                return false;
+                                // Log all button texts for debugging
+                                const allTexts = allElements.slice(0, 20).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean);
+                                return { clicked: false, availableButtons: allTexts };
                             }
+                        });
+                        const selectPayload = clickResult?.[0]?.result || { clicked: false };
+                        await appendDiagnosticLog('travel_groups_select', {
+                            tabId: targetTab.id,
+                            url: targetTab.url,
+                            clicked: selectPayload.clicked || false,
+                            buttonText: selectPayload.text || '',
+                            availableButtons: selectPayload.availableButtons || []
                         });
                         await new Promise(r => setTimeout(r, 5000));
                         return checkForSlots(recursionDepth + 1);
                     } catch (e) {
                         console.error('❌ Ошибка клика Select:', e);
+                        await appendDiagnosticLog('travel_groups_select_error', {
+                            tabId: targetTab.id,
+                            url: targetTab.url,
+                            error: e.message || String(e)
+                        });
                     }
                 }
 
                 // 3. Авто-логин (Human-Like Typing Version)
                 if (autoLogin && loginEmail && loginPassword && isAuthPage) {
                     console.log('🤖 START: Human-Like Login Process...');
+                    await appendDiagnosticLog('auto_login_started', {
+                        tabId: targetTab.id,
+                        url: targetTab.url,
+                        emailPresent: Boolean(loginEmail),
+                        passwordPresent: Boolean(loginPassword)
+                    });
 
                     try {
                         // ===== ШАГ 1: ВВОД EMAIL =====
@@ -839,15 +1455,42 @@ async function checkForSlots(recursionDepth = 0) {
 
                         if (!loginSuccess) {
                             console.warn('⚠️ URL did not change in 15 sec. Triggering Hard Reset.');
+                            await appendDiagnosticLog('auto_login_timeout', {
+                                tabId: targetTab.id,
+                                url: targetTab.url
+                            });
                             await hardResetAndRestart(targetTab.id, 'Авто-логин застрял (таймаут 15с)');
                             return;
                         }
 
                         console.log('🔄 Restarting check loop...');
+                        await appendDiagnosticLog('auto_login_completed', {
+                            tabId: targetTab.id,
+                            url: targetTab.url
+                        });
+
+                        // Navigate to post-login page if configured
+                        const { postLoginUrl = '' } = await chrome.storage.local.get('postLoginUrl');
+                        if (postLoginUrl) {
+                            console.log('📄 Переходим на post-login страницу:', postLoginUrl);
+                            await appendDiagnosticLog('post_login_navigate', {
+                                tabId: targetTab.id,
+                                postLoginUrl
+                            });
+                            await chrome.tabs.update(targetTab.id, { url: postLoginUrl, active: true });
+                            await waitForPageLoad(targetTab.id, 10000);
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+
                         return checkForSlots(recursionDepth + 1);
 
                     } catch (e) {
                         console.error('❌ Auto-login failed:', e);
+                        await appendDiagnosticLog('auto_login_failed', {
+                            tabId: targetTab.id,
+                            url: targetTab.url,
+                            message: e.message || 'unknown_error'
+                        });
                         await hardResetAndRestart(targetTab.id, `Ошибка авто-логина: ${e.message}`);
                         return;
                     }
@@ -873,56 +1516,103 @@ async function checkForSlots(recursionDepth = 0) {
 
                 const div = document.createElement('div');
                 div.id = 'tls-ext-indicator';
-                div.innerHTML = `
-                    <div id="tls-panel" style="
-                        position: fixed;
-                        bottom: 20px;
-                        right: 20px;
-                        background: rgba(16, 24, 40, 0.95);
-                        color: white;
-                        padding: 12px 16px;
-                        border-radius: 12px;
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                        font-size: 13px;
-                        z-index: 2147483647;
-                        display: flex;
-                        align-items: center;
-                        gap: 12px;
-                        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-                        border: 1px solid rgba(255, 255, 255, 0.1);
-                        backdrop-filter: blur(8px);
-                        transition: all 0.3s ease;
-                        cursor: default;
-                        user-select: none;
-                    ">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-size: 18px;">🇮🇹</span>
-                            <div>
-                                <div style="font-weight: 600; color: #fff;">TLS Monitor</div>
-                                <div style="font-size: 11px; color: #00ff88; display: flex; align-items: center; gap: 4px;">
-                                    <span style="width: 6px; height: 6px; background: #00ff88; border-radius: 50%; display: inline-block; animation: tls-pulse 1.5s infinite;"></span>
-                                    Активен
-                                </div>
-                            </div>
-                        </div>
-                        <div style="width: 1px; height: 24px; background: rgba(255,255,255,0.1); margin: 0 4px;"></div>
-                        <div id="tls-close-btn" class="tls-close-btn" style="cursor: pointer; padding: 4px; opacity: 0.6; transition: opacity 0.2s;">
-                            ✕
-                        </div>
-                    </div>
-                    <style>
-                        @keyframes tls-pulse {
-                            0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
-                            70% { box-shadow: 0 0 0 6px rgba(0, 255, 136, 0); }
-                            100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
-                        }
-                        .tls-close-btn:hover { opacity: 1 !important; }
-                    </style>
+
+                const panel = document.createElement('div');
+                panel.id = 'tls-panel';
+                panel.style.position = 'fixed';
+                panel.style.bottom = '20px';
+                panel.style.right = '20px';
+                panel.style.background = 'rgba(16, 24, 40, 0.95)';
+                panel.style.color = 'white';
+                panel.style.padding = '12px 16px';
+                panel.style.borderRadius = '12px';
+                panel.style.fontFamily = '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif';
+                panel.style.fontSize = '13px';
+                panel.style.zIndex = '2147483647';
+                panel.style.display = 'flex';
+                panel.style.alignItems = 'center';
+                panel.style.gap = '12px';
+                panel.style.boxShadow = '0 8px 32px rgba(0, 0, 0, 0.4)';
+                panel.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+                panel.style.backdropFilter = 'blur(8px)';
+                panel.style.transition = 'all 0.3s ease';
+                panel.style.cursor = 'default';
+                panel.style.userSelect = 'none';
+
+                const content = document.createElement('div');
+                content.style.display = 'flex';
+                content.style.alignItems = 'center';
+                content.style.gap = '8px';
+
+                const flag = document.createElement('span');
+                flag.style.fontSize = '18px';
+                flag.textContent = '🇮🇹';
+
+                const textWrap = document.createElement('div');
+
+                const title = document.createElement('div');
+                title.style.fontWeight = '600';
+                title.style.color = '#fff';
+                title.textContent = 'TLS Monitor';
+
+                const subtitle = document.createElement('div');
+                subtitle.style.fontSize = '11px';
+                subtitle.style.color = '#00ff88';
+                subtitle.style.display = 'flex';
+                subtitle.style.alignItems = 'center';
+                subtitle.style.gap = '4px';
+
+                const dot = document.createElement('span');
+                dot.style.width = '6px';
+                dot.style.height = '6px';
+                dot.style.background = '#00ff88';
+                dot.style.borderRadius = '50%';
+                dot.style.display = 'inline-block';
+                dot.style.animation = 'tls-pulse 1.5s infinite';
+
+                const subtitleText = document.createElement('span');
+                subtitleText.textContent = 'Активен';
+
+                const divider = document.createElement('div');
+                divider.style.width = '1px';
+                divider.style.height = '24px';
+                divider.style.background = 'rgba(255,255,255,0.1)';
+                divider.style.margin = '0 4px';
+
+                const closeButton = document.createElement('div');
+                closeButton.id = 'tls-close-btn';
+                closeButton.className = 'tls-close-btn';
+                closeButton.style.cursor = 'pointer';
+                closeButton.style.padding = '4px';
+                closeButton.style.opacity = '0.6';
+                closeButton.style.transition = 'opacity 0.2s';
+                closeButton.textContent = '✕';
+
+                const style = document.createElement('style');
+                style.textContent = `
+                    @keyframes tls-pulse {
+                        0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
+                        70% { box-shadow: 0 0 0 6px rgba(0, 255, 136, 0); }
+                        100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+                    }
+                    .tls-close-btn:hover { opacity: 1 !important; }
                 `;
+
+                subtitle.appendChild(dot);
+                subtitle.appendChild(subtitleText);
+                textWrap.appendChild(title);
+                textWrap.appendChild(subtitle);
+                content.appendChild(flag);
+                content.appendChild(textWrap);
+                panel.appendChild(content);
+                panel.appendChild(divider);
+                panel.appendChild(closeButton);
+                div.appendChild(panel);
+                div.appendChild(style);
                 document.body.appendChild(div);
 
-                document.getElementById('tls-close-btn').addEventListener('click', () => {
-                    document.getElementById('tls-panel').style.display = 'none';
+                closeButton.addEventListener('click', () => {
+                    panel.style.display = 'none';
                 });
             }
         });
@@ -973,107 +1663,33 @@ async function checkForSlots(recursionDepth = 0) {
 
                 console.log('📄 Текст страницы (первые 100 символов):', pageText.substring(0, 100));
 
-                // 🛡️ RATE LIMIT DETECTION
-                const rateLimitKeywords = ['error 1015', 'you are being rate limited', 'too many requests', 'temporarily blocked'];
-                const matchedKeyword = rateLimitKeywords.find(kw => pageText.includes(kw));
+                const hasBookingUi = Boolean(
+                    document.querySelector('[data-testid*="appointment"]') ||
+                    document.querySelector('[class*="appointment"]') ||
+                    document.querySelector('[class*="booking"]') ||
+                    document.querySelector('[id*="appointment"]') ||
+                    document.querySelector('[id*="booking"]') ||
+                    Array.from(document.querySelectorAll('button, a')).some((element) => {
+                        const text = (element.innerText || '').toLowerCase();
+                        return text.includes('book') || text.includes('slot') || text.includes('appointment') || text.includes('select');
+                    })
+                );
 
-                if (matchedKeyword) {
-                    console.log('🚫 Rate limit keyword found:', matchedKeyword);
-                    return {
-                        hasSlots: false,
-                        textLength: pageText.length,
-                        debugText: pageText.substring(0, 200),
-                        isRateLimited: true,
-                        matchedKeyword
-                    };
-                }
-
-                // 🛡️ ЗАЩИТА ОТ ЛОЖНЫХ СИГНАЛОВ
-
-                // 1. Проверяем что мы на правильной странице (appointment/booking)
-                const isAppointmentPage = location.href.includes('appointment') ||
-                    location.href.includes('booking') ||
-                    location.href.includes('schedule');
-
-                // 2. Проверяем признаки страниц ошибок
-                const errorKeywords = ['error', 'something went wrong', 'page not found', '404', '500', 'unavailable', 'maintenance'];
-                const hasError = errorKeywords.some(kw => pageText.includes(kw) && pageText.length < 1000);
-
-                // 3. Проверяем что это НЕ страница логина
-                const isLoginPage = pageText.includes('login') || pageText.includes('sign in') || pageText.includes('password');
-
-                // 4. Проверяем ключевые слова "нет слотов" (ВАЖНО: проверяем ПЕРВЫМ!)
-                const hasNoSlots = keywordList.some(keyword => {
-                    const normalizedKeyword = normalize(keyword);
-                    const match = pageText.includes(normalizedKeyword);
-                    console.log(`🔍 Проверка фразы: "${normalizedKeyword}" -> ${match ? '✅ НАЙДЕНО' : '❌ НЕ НАЙДЕНО'}`);
-                    return match;
-                });
-
-                // 5. 🛡️ CAPTCHA DETECTION (только если НЕ найдено "no slots" - иначе страница работает!)
-                // Убраны слишком общие слова типа "please wait"
-                const captchaKeywords = [
-                    'verify you are human', 'checking your browser',
-                    'ddos protection', 'ray id:', 'attention required'
-                ];
-                const hasCaptcha = !hasNoSlots && captchaKeywords.some(kw => pageText.includes(kw));
-                const hasCaptchaElement = !hasNoSlots && (
+                const hasCaptchaElement = (
                     document.querySelector('[class*="captcha"]') ||
                     document.querySelector('[class*="turnstile"]') ||
                     document.querySelector('iframe[src*="captcha"]') ||
                     document.querySelector('iframe[src*="turnstile"]')
                 );
 
-                // 6. Проверяем что страница ПОЛНОСТЬЮ загружена (должен быть TLScontact footer)
-                const hasFooter = pageText.includes('tlscontact') && pageText.includes('all rights reserved');
-                const isPageLoaded = pageText.length > 500 && hasFooter;
-                const isOnAuthUrl = location.href.includes('auth') || location.href.includes('login');
-
-                // 🎯 НАДЁЖНАЯ ЛОГИКА С ЗАЩИТОЙ ОТ ЛОЖНЫХ СИГНАЛОВ:
-
-                let slotsAvailable = false;
-                let reason = '';
-
-                // ВАЖНО: Сначала проверяем hasNoSlots - если найдено, страница 100% работает!
-                if (hasNoSlots) {
-                    // Явно написано "нет слотов" - страница работает, слотов нет
-                    slotsAvailable = false;
-                    reason = 'Найдена фраза "нет слотов"';
-                } else if (!isPageLoaded) {
-                    // Страница не загружена полностью - не сигналим
-                    slotsAvailable = false;
-                    reason = 'Страница не загружена (нет footer TLScontact)';
-                } else if (hasCaptcha || hasCaptchaElement) {
-                    // CAPTCHA/Challenge - не сигналим, уведомляем
-                    slotsAvailable = false;
-                    reason = '⚠️ CAPTCHA! Требуется ручное вмешательство';
-                } else if (hasError) {
-                    // Страница с ошибкой - не сигналим
-                    slotsAvailable = false;
-                    reason = 'Страница с ошибкой';
-                } else if (isOnAuthUrl || (isLoginPage && !isAppointmentPage)) {
-                    // Страница логина - не сигналим
-                    slotsAvailable = false;
-                    reason = 'Страница логина';
-                } else if (!isAppointmentPage) {
-                    // Не на странице бронирования - не сигналим
-                    slotsAvailable = false;
-                    reason = 'Не на странице appointment';
-                } else {
-                    // НА СТРАНИЦЕ APPOINTMENT, ЗАГРУЖЕНА, НЕТ CAPTCHA, НЕТ ФРАЗЫ "NO SLOTS" → СИГНАЛИМ!
-                    slotsAvailable = true;
-                    reason = '✅ Страница изменилась! Возможно есть слоты!';
-                }
-
-                console.log(`🎯 Результат: ${slotsAvailable ? '✅ СЛОТЫ ЕСТЬ' : '❌ Нет слотов'} (${reason})`);
-
                 return {
-                    hasSlots: slotsAvailable,
+                    url: location.href,
+                    pageText,
+                    hasBookingUi,
+                    hasCaptchaElement: Boolean(hasCaptchaElement),
+                    hasTlsFooter: pageText.includes('tlscontact') && pageText.includes('all rights reserved'),
                     textLength: pageText.length,
-                    debugText: pageText.substring(0, 200),
-                    isRateLimited: false,
-                    isAuthError: pageText.includes('invalid_grant') || pageText.includes('code not valid'),
-                    reason: reason
+                    debugText: pageText.substring(0, 200)
                 };
             },
             args: [keywords]
@@ -1087,75 +1703,129 @@ async function checkForSlots(recursionDepth = 0) {
             lastCheck: new Date().toLocaleTimeString('ru-RU')
         });
 
+        const firstResult = results?.[0]?.result || null;
+
         console.log('───────────────────────────────────────────');
         console.log('📊 РЕЗУЛЬТАТ ПРОВЕРКИ:');
-        console.log('  → hasSlots:', results[0]?.result?.hasSlots);
-        console.log('  → textLength:', results[0]?.result?.textLength);
-        console.log('  → isRateLimited:', results[0]?.result?.isRateLimited);
+        console.log('  → state:', firstResult?.state);
+        console.log('  → textLength:', firstResult?.textLength);
+        console.log('  → reason:', firstResult?.reason);
         console.log('───────────────────────────────────────────');
 
-        if (results && results[0] && results[0].result) {
-            const { hasSlots, textLength, isRateLimited: pageRateLimited, isAuthError, reason } = results[0].result;
+        if (firstResult) {
+            const pageSnapshot = firstResult;
+
+            if (shouldForceReturnToTlsUrl(pageSnapshot.url, tlsUrl, startUrl)) {
+                console.log('↪️ Анализ показал лендинг вместо booking page. Возвращаемся на tlsUrl.');
+                await appendDiagnosticLog('retarget_booking_page', {
+                    fromUrl: pageSnapshot.url,
+                    toUrl: tlsUrl,
+                    reason: 'analysis_detected_landing'
+                });
+                await chrome.tabs.update(targetTab.id, { url: tlsUrl, active: true });
+                await waitForPageLoad(targetTab.id, 10000);
+                await new Promise(r => setTimeout(r, 1500));
+                return checkForSlots(recursionDepth + 1);
+            }
+
+            const analysis = analyzeTlsPageState({
+                pageText: pageSnapshot.pageText,
+                url: pageSnapshot.url,
+                hasBookingUi: pageSnapshot.hasBookingUi,
+                hasCaptchaElement: pageSnapshot.hasCaptchaElement,
+                hasTlsFooter: pageSnapshot.hasTlsFooter,
+                keywordList: keywords,
+                rateLimitKeywords: [
+                    'error 1015',
+                    'you are being rate limited',
+                    'too many requests',
+                    'temporarily blocked',
+                    'sorry, you have been blocked',
+                    'you have been blocked',
+                    'unable to access',
+                    'access denied'
+                ],
+                captchaKeywords: ['verify you are human', 'checking your browser', 'ddos protection', 'ray id:', 'attention required'],
+                errorKeywords: ['error', 'something went wrong', 'page not found', '404', '500', 'unavailable', 'maintenance']
+            });
+            const { state, isAuthError } = analysis;
+
+            console.log(`🎯 Результат: ${state} (${analysis.reason})`);
+            console.log('───────────────────────────────────────────');
+            console.log('📊 РЕЗУЛЬТАТ ПРОВЕРКИ:');
+            console.log('  → state:', state);
+            console.log('  → textLength:', analysis.textLength);
+            console.log('  → reason:', analysis.reason);
+            console.log('───────────────────────────────────────────');
 
             // 🛑 AUTH ERROR (JSON response instead of HTML)
             if (isAuthError) {
-                console.log('🚨 Auth Error detected (invalid_grant) -> Hard Reset');
-                await hardResetAndRestart(targetTab.id, 'Auth Error: invalid_grant');
+                await handlePageAnalysisResult(targetTab.id, {
+                    ...analysis,
+                    url: pageSnapshot.url,
+                    state: TLS_PAGE_STATES.AUTH_ERROR,
+                    reason: 'Auth Error: invalid_grant'
+                });
                 return;
             }
 
-            // 🛡️ RATE LIMIT DETECTION
-            if (pageRateLimited) {
-                console.log('🚫🚫🚫 RATE LIMIT ОБНАРУЖЕН! 🚫🚫🚫');
-                await handleRateLimit();
-                const afterBackoff = (await chrome.storage.local.get('rateLimitBackoff')).rateLimitBackoff;
-                await addHistoryEntry('error', `⚠️ Rate limit! Ждём ${afterBackoff} мин...`);
+            await handlePageAnalysisResult(targetTab.id, {
+                ...analysis,
+                url: pageSnapshot.url,
+                state: analysis.state || TLS_PAGE_STATES.ERROR
+            });
 
-                // 📨 Уведомление в Telegram
-                await sendTelegramMessage(
-                    `🚫 <b>RATE LIMIT!</b>\n\n` +
-                    `Cloudflare заблокировал запросы.\n\n` +
-                    `⏳ Пауза: <b>${afterBackoff} мин</b>\n\n` +
-                    `Бот автоматически продолжит после паузы.`
-                );
-                return;
-            }
-
-            // 🧩 CAPTCHA DETECTION
-            if (reason && reason.includes('CAPTCHA')) {
-                console.log('🧩🧩🧩 CAPTCHA ОБНАРУЖЕНА! 🧩🧩🧩');
-                await addHistoryEntry('error', '🧩 CAPTCHA! Зайдите в браузер');
-
-                // 📨 Уведомление в Telegram
-                await sendTelegramMessage(
-                    `🧩 <b>CAPTCHA!</b>\n\n` +
-                    `Cloudflare требует проверку.\n\n` +
-                    `⚡ <b>Зайдите в браузер и пройдите проверку вручную!</b>\n\n` +
-                    `После прохождения бот продолжит работу.`
-                );
-                return;
-            }
-
-            // 🛡️ ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА: Проверяем минимальную длину текста
-            if (textLength < 300) {
-                console.log('⚠️ Текст слишком короткий (' + textLength + ' символов), страница не загружена');
-                await addHistoryEntry('skip', 'Страница загружается...');
-                return;
-            }
-
-            if (hasSlots) {
-                await addHistoryEntry('slots', '🎉 СЛОТЫ НАЙДЕНЫ!');
-                await handleSlotsFound();
-            } else {
-                await addHistoryEntry('no_slots', 'Слотов нет');
-                console.log('❌ Слотов нет');
+            // 🔄 RETRY on "something went wrong" error — navigate back to booking and try again
+            if (analysis.state === TLS_PAGE_STATES.ERROR &&
+                analysis.debugText && analysis.debugText.includes('something went wrong') &&
+                recursionDepth < 5) {
+                console.log('🔄 Ошибка "something went wrong" — перезагружаем и пробуем снова...');
+                await appendDiagnosticLog('error_page_retry', {
+                    tabId: targetTab.id,
+                    url: pageSnapshot.url,
+                    recursionDepth,
+                    reason: 'something_went_wrong'
+                });
+                try {
+                    await chrome.tabs.update(targetTab.id, { url: tlsUrl, active: true });
+                    await waitForPageLoad(targetTab.id, 10000);
+                    await new Promise(r => setTimeout(r, 2000));
+                    return checkForSlots(recursionDepth + 1);
+                } catch (e) {
+                    console.error('❌ Ошибка при retry:', e.message);
+                }
             }
         } else {
             console.log('⚠️ Нет результата проверки');
+            await setMonitorState(TLS_PAGE_STATES.ERROR, 'Нет результата проверки');
+            await setLastDiagnostic({
+                tabId: targetTab?.id || null,
+                state: TLS_PAGE_STATES.ERROR,
+                reason: 'Нет результата проверки',
+                textLength: 0,
+                url: targetTab?.url || '',
+                matchedKeyword: '',
+                debugText: ''
+            });
+            await appendDiagnosticLog('check_failed', {
+                reason: 'no_result',
+                tabId: targetTab?.id || null,
+                url: targetTab?.url || ''
+            });
             await addHistoryEntry('error', 'Нет результата');
         }
     } catch (e) {
         console.error('❌ Ошибка проверки:', e.message);
+        await setMonitorState(TLS_PAGE_STATES.ERROR, e.message);
+        await setLastDiagnostic({
+            state: TLS_PAGE_STATES.ERROR,
+            reason: e.message,
+            textLength: 0,
+            url: '',
+            matchedKeyword: '',
+            debugText: ''
+        });
+        await appendDiagnosticLog('check_exception', { message: e.message || 'unknown_error' });
         await addHistoryEntry('error', 'Ошибка: ' + e.message.substring(0, 30));
         const stats = await chrome.storage.local.get(['checkCount']);
         await chrome.storage.local.set({
@@ -1270,51 +1940,104 @@ async function handleSlotsFound() {
 
                     const div = document.createElement('div');
                     div.id = 'tls-alert-overlay';
-                    div.innerHTML = `
-                        <div class="tls-alert-card">
-                            <div class="tls-icon">🎉</div>
-                            <h1>СЛОТЫ НАЙДЕНЫ!</h1>
-                            <div class="tls-time">${new Date().toLocaleTimeString('ru-RU')}</div>
-                            <p>Срочно проверьте доступные даты!</p>
-                            <button>Я вижу!</button>
-                        </div>
-                        <style>
-                            #tls-alert-overlay {
-                                position: fixed;
-                                top: 0; left: 0; right: 0; bottom: 0;
-                                background: rgba(0, 0, 0, 0.85);
-                                z-index: 2147483647;
-                                display: flex;
-                                align-items: center;
-                                justify-content: center;
-                                backdrop-filter: blur(5px);
-                                animation: tls-fade-in 0.3s ease;
-                            }
-                            .tls-alert-card {
-                                background: linear-gradient(135deg, #1a1a2e, #16213e);
-                                padding: 40px;
-                                border-radius: 24px;
-                                text-align: center;
-                                color: white;
-                                border: 2px solid #00ff88;
-                                box-shadow: 0 0 50px rgba(0, 255, 136, 0.3);
-                                animation: tls-bounce 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                                max-width: 90%;
-                                width: 400px;
-                            }
-                            .tls-icon { font-size: 64px; margin-bottom: 20px; animation: tls-pulse 1s infinite; }
-                            #tls-alert-overlay h1 { font-size: 32px; margin: 0 0 10px 0; color: #00ff88; font-family: system-ui, sans-serif; font-weight: 800; }
-                            .tls-time { font-size: 24px; font-weight: 600; margin-bottom: 20px; color: #fff; font-family: monospace; }
-                            #tls-alert-overlay p { color: #aaa; margin-bottom: 30px; font-size: 16px; font-family: system-ui, sans-serif; }
-                            #tls-alert-overlay button { background: #00ff88; color: #000; border: none; padding: 16px 32px; font-size: 18px; font-weight: bold; border-radius: 12px; cursor: pointer; transition: transform 0.2s; width: 100%; font-family: system-ui, sans-serif; }
-                            #tls-alert-overlay button:hover { transform: scale(1.05); background: #00cc6a; }
-                            @keyframes tls-fade-in { from { opacity: 0; } to { opacity: 1; } }
-                            @keyframes tls-bounce { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-                            @keyframes tls-pulse { 0% { transform: scale(1); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
-                        </style>
+
+                    div.style.position = 'fixed';
+                    div.style.top = '0';
+                    div.style.left = '0';
+                    div.style.right = '0';
+                    div.style.bottom = '0';
+                    div.style.background = 'rgba(0, 0, 0, 0.85)';
+                    div.style.zIndex = '2147483647';
+                    div.style.display = 'flex';
+                    div.style.alignItems = 'center';
+                    div.style.justifyContent = 'center';
+                    div.style.backdropFilter = 'blur(5px)';
+                    div.style.animation = 'tls-fade-in 0.3s ease';
+
+                    const card = document.createElement('div');
+                    card.className = 'tls-alert-card';
+                    card.style.background = 'linear-gradient(135deg, #1a1a2e, #16213e)';
+                    card.style.padding = '40px';
+                    card.style.borderRadius = '24px';
+                    card.style.textAlign = 'center';
+                    card.style.color = 'white';
+                    card.style.border = '2px solid #00ff88';
+                    card.style.boxShadow = '0 0 50px rgba(0, 255, 136, 0.3)';
+                    card.style.animation = 'tls-bounce 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+                    card.style.maxWidth = '90%';
+                    card.style.width = '400px';
+
+                    const icon = document.createElement('div');
+                    icon.className = 'tls-icon';
+                    icon.style.fontSize = '64px';
+                    icon.style.marginBottom = '20px';
+                    icon.style.animation = 'tls-pulse 1s infinite';
+                    icon.textContent = '🎉';
+
+                    const title = document.createElement('h1');
+                    title.style.fontSize = '32px';
+                    title.style.margin = '0 0 10px 0';
+                    title.style.color = '#00ff88';
+                    title.style.fontFamily = 'system-ui, sans-serif';
+                    title.style.fontWeight = '800';
+                    title.textContent = 'СЛОТЫ НАЙДЕНЫ!';
+
+                    const time = document.createElement('div');
+                    time.className = 'tls-time';
+                    time.style.fontSize = '24px';
+                    time.style.fontWeight = '600';
+                    time.style.marginBottom = '20px';
+                    time.style.color = '#fff';
+                    time.style.fontFamily = 'monospace';
+                    time.textContent = new Date().toLocaleTimeString('ru-RU');
+
+                    const message = document.createElement('p');
+                    message.style.color = '#aaa';
+                    message.style.marginBottom = '30px';
+                    message.style.fontSize = '16px';
+                    message.style.fontFamily = 'system-ui, sans-serif';
+                    message.textContent = 'Срочно проверьте доступные даты!';
+
+                    const button = document.createElement('button');
+                    button.style.background = '#00ff88';
+                    button.style.color = '#000';
+                    button.style.border = 'none';
+                    button.style.padding = '16px 32px';
+                    button.style.fontSize = '18px';
+                    button.style.fontWeight = 'bold';
+                    button.style.borderRadius = '12px';
+                    button.style.cursor = 'pointer';
+                    button.style.transition = 'transform 0.2s';
+                    button.style.width = '100%';
+                    button.style.fontFamily = 'system-ui, sans-serif';
+                    button.textContent = 'Я вижу!';
+
+                    button.addEventListener('mouseenter', () => {
+                        button.style.transform = 'scale(1.05)';
+                        button.style.background = '#00cc6a';
+                    });
+
+                    button.addEventListener('mouseleave', () => {
+                        button.style.transform = 'scale(1)';
+                        button.style.background = '#00ff88';
+                    });
+
+                    const style = document.createElement('style');
+                    style.textContent = `
+                        @keyframes tls-fade-in { from { opacity: 0; } to { opacity: 1; } }
+                        @keyframes tls-bounce { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+                        @keyframes tls-pulse { 0% { transform: scale(1); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
                     `;
+
+                    card.appendChild(icon);
+                    card.appendChild(title);
+                    card.appendChild(time);
+                    card.appendChild(message);
+                    card.appendChild(button);
+                    div.appendChild(card);
+                    div.appendChild(style);
                     document.body.appendChild(div);
-                    div.querySelector('button').addEventListener('click', () => div.remove());
+                    button.addEventListener('click', () => div.remove());
                 }
             });
         }
