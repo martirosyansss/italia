@@ -1464,6 +1464,7 @@ async function checkForSlots(recursionDepth = 0) {
                         }
 
                         console.log('🔄 Restarting check loop...');
+                        await setMonitorState(TLS_PAGE_STATES.RUNNING, 'Авто-логин завершён, продолжаю проверку');
                         await appendDiagnosticLog('auto_login_completed', {
                             tabId: targetTab.id,
                             url: targetTab.url
