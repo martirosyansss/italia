@@ -100,8 +100,10 @@ function shouldForceReturnToTlsUrl(currentUrl, tlsUrl, startUrl = '') {
         const isAppointmentLike = pathname.includes('appointment') || pathname.includes('booking') || pathname.includes('schedule');
         const isAuthLike = current.hostname.startsWith('auth.') || pathname.includes('auth') || pathname.includes('login');
         const isTravelGroups = pathname.includes('travel-groups');
+        // Language-only pages (/xx-xx/) should not redirect to booking — user needs auth first
+        const isLanguageOnly = /^\/[a-z]{2}-[a-z]{2}\/?$/.test(pathname);
 
-        return sameTlsHost && isLanding && !isAppointmentLike && !isAuthLike && !isTravelGroups;
+        return sameTlsHost && isLanding && !isAppointmentLike && !isAuthLike && !isTravelGroups && !isLanguageOnly;
     } catch (error) {
         return false;
     }
@@ -1223,8 +1225,8 @@ async function checkForSlots(recursionDepth = 0) {
                     }
                 }
 
-                if (isStartPage && autoLogin) {
-                    console.log('🔐 Стартовая страница /en-us: пробуем перейти к логину через UI');
+                if ((isStartPage || isLanguagePage) && autoLogin) {
+                    console.log('🔐 Стартовая/языковая страница: пробуем перейти к логину через UI');
                     const signInResult = await safeExecuteScript({
                         target: { tabId: targetTab.id },
                         func: () => {
@@ -1271,6 +1273,19 @@ async function checkForSlots(recursionDepth = 0) {
                         url: targetTab.url,
                         reason: 'no_sign_in_trigger_found'
                     });
+
+                    // Если Sign In не найден на языковой странице — перенаправить на /en-us
+                    if (isLanguagePage && !isStartPage && startUrl) {
+                        console.log('🌍 Перенаправление с языковой страницы на /en-us:', startUrl);
+                        await appendDiagnosticLog('language_to_start_redirect', {
+                            fromUrl: targetTab.url,
+                            toUrl: startUrl
+                        });
+                        await chrome.tabs.update(targetTab.id, { url: startUrl, active: true });
+                        await waitForPageLoad(targetTab.id, 10000);
+                        await new Promise(r => setTimeout(r, 1500));
+                        return checkForSlots(recursionDepth + 1);
+                    }
                 }
 
                 // 1. Если есть прямая ссылка для входа И НЕ на travel-groups И НЕ уже на auth — редирект
